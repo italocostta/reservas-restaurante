@@ -20,10 +20,17 @@ import (
 type TableFinder interface {
 	// FindCandidates devolve as mesas ativas com capacidade suficiente e SEM
 	// sobreposição no intervalo, já ordenadas da menor para a maior.
+	//
+	// Devolve mesas INDIVIDUAIS. A combinação automática (juntar 4+4 para um
+	// grupo de 8 sem ninguém pedir) é a Fase 3b, deliberadamente não construída:
+	// exigiria um grafo de adjacência que ninguém quer manter e uma busca que é
+	// NP-difícil na forma geral, para automatizar uma decisão que o maître toma
+	// melhor olhando o salão.
 	FindCandidates(ctx context.Context, partySize int, starts, ends time.Time) ([]table.Table, error)
 
-	// GetTable busca a mesa que o staff pediu explicitamente.
-	GetTable(ctx context.Context, id uuid.UUID) (table.Table, error)
+	// GetTables busca as mesas que o staff pediu explicitamente — uma no override
+	// manual, várias numa combinação (Fase 3a).
+	GetTables(ctx context.Context, ids []uuid.UUID) ([]table.Table, error)
 }
 
 type ReservationCreator interface {
@@ -80,10 +87,10 @@ func (a *Allocator) CreateReservation(ctx context.Context, req AllocationRequest
 		return Reservation{}, err
 	}
 
-	// Manual: SEM retry. A colisão é definitiva — a Mesa 12 vai colidir de novo
-	// na segunda tentativa e na terceira. Não existe "próxima opção" a encontrar,
-	// então reconsultar é trabalho puro sem chance de resultado diferente.
-	if req.PreferredTableID != nil {
+	// Manual (uma mesa) ou combinação (várias): SEM retry nos dois casos. A
+	// colisão é definitiva — as MESMAS mesas vão colidir de novo na segunda
+	// tentativa e na terceira. Não existe "próxima opção" a encontrar.
+	if len(req.PreferredTableIDs) > 0 {
 		res, err := a.tryAllocateSpecific(ctx, req)
 		if errors.Is(err, ErrSlotTaken) {
 			return Reservation{}, ErrTableUnavailable
@@ -175,25 +182,64 @@ func formatarHora(d time.Duration) string {
 // (manual) ou gatilho de retry (automático) é o CreateReservation. Esta função
 // não sabe em qual dos dois caminhos está sendo usada.
 func (a *Allocator) tryAllocateSpecific(ctx context.Context, req AllocationRequest) (Reservation, error) {
-	mesa, err := a.finder.GetTable(ctx, *req.PreferredTableID)
-	if errors.Is(err, table.ErrNotFound) {
-		return Reservation{}, invalido("A mesa informada não existe.")
+	ids := req.PreferredTableIDs
+
+	// Sem isto, `table_ids: [A, A]` produziria duas linhas de junção com a mesma
+	// chave primária — um 23505 feio no lugar de uma mensagem útil — E, pior,
+	// contaria a capacidade da mesa A DUAS VEZES, deixando um grupo de 8 "caber"
+	// numa mesa de 4 informada em duplicata. Erro de digitação virando overbooking.
+	if temDuplicata(ids) {
+		return Reservation{}, invalido("A mesma mesa foi informada mais de uma vez.")
 	}
+
+	mesas, err := a.finder.GetTables(ctx, ids)
 	if err != nil {
 		return Reservation{}, err
 	}
-
-	if !mesa.IsActive {
-		return Reservation{}, invalido("A mesa %q está inativa e não aceita reservas.", mesa.Name)
+	// O repositório devolve as que achou; quem interpreta "pedi 3 e vieram 2" é
+	// aqui, que é quem consegue dizer o que fazer a respeito.
+	if len(mesas) != len(ids) {
+		return Reservation{}, invalido("Uma ou mais das mesas informadas não existem.")
 	}
-	if req.PartySize > mesa.Capacity {
+
+	capacidade := 0
+	for _, m := range mesas {
+		if !m.IsActive {
+			return Reservation{}, invalido("A mesa %q está inativa e não aceita reservas.", m.Name)
+		}
+		capacidade += m.Capacity
+	}
+
+	// Capacidade de uma combinação = SOMA das capacidades. É uma simplificação, e
+	// está registrada como débito: duas mesas de 4 encostadas às vezes sentam 8,
+	// às vezes 6 (você perde os lugares das pontas que ficaram no meio), às vezes
+	// 10 (cabe gente nas quinas). Restaurante real tem regra própria, e ela não
+	// sai de uma fórmula. Aqui a soma é o guarda-corpo, não a verdade.
+	if req.PartySize > capacidade {
+		if len(mesas) == 1 {
+			return Reservation{}, invalido(
+				"Grupo de %d pessoas excede a capacidade da mesa %q (%d).",
+				req.PartySize, mesas[0].Name, mesas[0].Capacity,
+			)
+		}
 		return Reservation{}, invalido(
-			"Grupo de %d pessoas excede a capacidade da mesa %q (%d).",
-			req.PartySize, mesa.Name, mesa.Capacity,
+			"Grupo de %d pessoas excede a capacidade combinada das %d mesas (%d lugares).",
+			req.PartySize, len(mesas), capacidade,
 		)
 	}
 
-	return a.creator.Insert(ctx, novaReserva(req, mesa.ID))
+	return a.creator.Insert(ctx, novaReserva(req, ids))
+}
+
+func temDuplicata(ids []uuid.UUID) bool {
+	visto := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		if visto[id] {
+			return true
+		}
+		visto[id] = true
+	}
+	return false
 }
 
 // tryAllocateAutomatic é o caminho da heurística gulosa. Repare no tamanho: o
@@ -214,18 +260,20 @@ func (a *Allocator) tryAllocateAutomatic(ctx context.Context, req AllocationRequ
 		return Reservation{}, ErrNoAvailability
 	}
 
-	// Só a primeira. Se ela colidir, o ErrSlotTaken sobe e o CreateReservation
-	// RECONSULTA — não itera candidatas[1] daqui. A lista é um retrato de um
-	// instante que já passou: se alguém tomou a candidatas[0], pode ter tomado
-	// a [1] também. Reconsultar custa um round-trip e devolve a verdade.
-	return a.creator.Insert(ctx, novaReserva(req, candidatas[0].ID))
+	// Só a primeira, e UMA mesa só — o caminho automático não combina (Fase 3b).
+	//
+	// Se ela colidir, o ErrSlotTaken sobe e o CreateReservation RECONSULTA — não
+	// itera candidatas[1] daqui. A lista é um retrato de um instante que já
+	// passou: se alguém tomou a candidatas[0], pode ter tomado a [1] também.
+	// Reconsultar custa um round-trip e devolve a verdade.
+	return a.creator.Insert(ctx, novaReserva(req, []uuid.UUID{candidatas[0].ID}))
 }
 
 // novaReserva monta a linha a inserir. Status fica zerado de propósito: o
 // DEFAULT 'confirmed' do schema é a fonte da verdade, e o RETURNING traz de volta.
-func novaReserva(req AllocationRequest, tableID uuid.UUID) Reservation {
+func novaReserva(req AllocationRequest, tableIDs []uuid.UUID) Reservation {
 	return Reservation{
-		TableID:       tableID,
+		TableIDs:      tableIDs,
 		CustomerName:  strings.TrimSpace(req.CustomerName),
 		CustomerPhone: strings.TrimSpace(req.CustomerPhone),
 		PartySize:     req.PartySize,

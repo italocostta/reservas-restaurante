@@ -42,9 +42,15 @@ func NewHandler(a allocator, repo repository, s schedule) *Handler {
 }
 
 type createRequest struct {
-	// Ponteiro: ausente ou null significa "escolha a mesa por mim" (heurística).
-	// Preenchido significa "use esta mesa" — e é o que decide se o retry roda.
-	TableID *uuid.UUID `json:"table_id"`
+	// Ausente, null ou vazio → "escolha a mesa por mim" (heurística automática).
+	// Uma mesa  → override manual.
+	// Várias    → COMBINAÇÃO: o staff empurrou as mesas, o sistema registra e
+	//             protege cada uma delas com a EXCLUDE (Fase 3a).
+	//
+	// Era `table_id` (uuid único) até a Fase 3a. Mudança quebrada de contrato,
+	// feita agora porque o frontend ainda não existe — depois dele, custaria o
+	// dobro.
+	TableIDs []uuid.UUID `json:"table_ids"`
 
 	CustomerName  string    `json:"customer_name"  example:"Maria Silva"`
 	CustomerPhone string    `json:"customer_phone" example:"11999998888"`
@@ -90,14 +96,14 @@ func responder(w http.ResponseWriter, r *http.Request, err error, contexto strin
 // Create godoc
 //
 //	@Summary		Cria uma reserva
-//	@Description	Com `table_id` nulo ou omitido, o sistema aloca automaticamente a menor mesa livre que comporte o grupo. Com `table_id` informado, usa exatamente aquela mesa.
+//	@Description	`table_ids` vazio ou omitido: o sistema aloca automaticamente a menor mesa livre que comporte o grupo. Com uma mesa: usa exatamente aquela. Com várias: registra uma COMBINAÇÃO (o staff empurrou as mesas), validando a capacidade somada e protegendo cada mesa individualmente contra sobreposição.
 //	@Tags			reservas
 //	@Accept			json
 //	@Produce		json
 //	@Param			reserva	body		createRequest	true	"Dados da reserva"
 //	@Success		201		{object}	Reservation
-//	@Failure		400		{object}	httpx.ErrorResponse	"Dados inválidos, fora do expediente, mesa inativa ou grupo maior que a mesa"
-//	@Failure		409		{object}	httpx.ErrorResponse	"Mesa pedida ocupada, ou nenhuma mesa disponível no horário"
+//	@Failure		400		{object}	httpx.ErrorResponse	"Dados inválidos, fora do expediente, mesa inativa/inexistente/repetida, ou grupo maior que a capacidade"
+//	@Failure		409		{object}	httpx.ErrorResponse	"Mesa(s) pedida(s) ocupada(s), ou nenhuma mesa disponível no horário"
 //	@Router			/reservations [post]
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createRequest
@@ -112,12 +118,12 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	// A conversão do tipo de transporte para o tipo de domínio. Seis linhas
 	// explícitas no lugar do que em Java seria um MapStruct.
 	res, err := h.allocator.CreateReservation(r.Context(), AllocationRequest{
-		PreferredTableID: req.TableID,
-		CustomerName:     req.CustomerName,
-		CustomerPhone:    req.CustomerPhone,
-		PartySize:        req.PartySize,
-		StartsAt:         req.StartsAt,
-		EndsAt:           req.EndsAt,
+		PreferredTableIDs: req.TableIDs,
+		CustomerName:      req.CustomerName,
+		CustomerPhone:     req.CustomerPhone,
+		PartySize:         req.PartySize,
+		StartsAt:          req.StartsAt,
+		EndsAt:            req.EndsAt,
 	})
 	if err != nil {
 		responder(w, r, err, "criando reserva")

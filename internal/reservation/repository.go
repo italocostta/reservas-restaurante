@@ -45,7 +45,9 @@ SELECT id, name, capacity, is_active, created_at
 FROM restaurant_tables
 WHERE id = $1`
 
-// GetTable busca a mesa que o staff pediu explicitamente (caminho manual).
+// GetTable busca uma mesa. Usada pela agenda (ScheduleReader), que sempre
+// pergunta por uma só.
+//
 // Reaproveita table.ErrNotFound em vez de criar um erro próprio: é a mesma
 // condição, e duplicar sentinela é como duplicar constante.
 func (r *PostgresRepo) GetTable(ctx context.Context, id uuid.UUID) (table.Table, error) {
@@ -64,6 +66,41 @@ func (r *PostgresRepo) GetTable(ctx context.Context, id uuid.UUID) (table.Table,
 	return t, nil
 }
 
+const getTablesSQL = `
+SELECT id, name, capacity, is_active, created_at
+FROM restaurant_tables
+WHERE id = ANY($1)`
+
+// GetTables busca N mesas de uma vez — o caminho manual da Fase 3a pode pedir
+// uma combinação de várias, e N chamadas a GetTable seriam N round-trips para
+// responder uma pergunta só.
+//
+// NÃO devolve ErrNotFound quando algum id não existe: devolve as que achou. Quem
+// sabe o que fazer com "pedi 3 e vieram 2" é o allocator, que consegue montar
+// uma mensagem útil dizendo QUAL mesa não existe. O repositório informa; ele não
+// julga.
+func (r *PostgresRepo) GetTables(ctx context.Context, ids []uuid.UUID) ([]table.Table, error) {
+	rows, err := r.db.Query(ctx, getTablesSQL, ids)
+	if err != nil {
+		return nil, fmt.Errorf("buscando mesas: %w", err)
+	}
+	defer rows.Close()
+
+	mesas := []table.Table{}
+	for rows.Next() {
+		var t table.Table
+		if err := rows.Scan(&t.ID, &t.Name, &t.Capacity, &t.IsActive, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("lendo mesa: %w", err)
+		}
+		mesas = append(mesas, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("buscando mesas: %w", err)
+	}
+
+	return mesas, nil
+}
+
 // A heurística gulosa inteira mora nesta query: filtra capacidade, elimina as
 // mesas com horário sobreposto, ordena da menor mesa suficiente para a maior.
 // Ao allocator sobra escolher a primeira.
@@ -80,6 +117,10 @@ func (r *PostgresRepo) GetTable(ctx context.Context, id uuid.UUID) (table.Table,
 // O desempate por t.name não é cosmético: sem ele, duas mesas de capacidade 4
 // voltam em ordem arbitrária, a heurística vira não-determinística entre
 // execuções, e um teste que hoje passa amanhã falha sem nada ter mudado.
+// Fase 3a: o NOT EXISTS agora olha reservation_tables, não reservations. A
+// pergunta "esta mesa está ocupada neste intervalo?" mudou de lugar junto com a
+// constraint — uma mesa pode estar ocupada por ser METADE de uma combinação, e
+// isso não aparece mais em reservations.table_id.
 const findCandidatesSQL = `
 SELECT t.id, t.name, t.capacity, t.is_active, t.created_at
 FROM restaurant_tables t
@@ -87,10 +128,10 @@ WHERE t.is_active = true
   AND t.capacity >= $1
   AND NOT EXISTS (
       SELECT 1
-      FROM reservations r
-      WHERE r.table_id = t.id
-        AND r.status = 'confirmed'
-        AND tstzrange(r.starts_at, r.ends_at) && tstzrange($2, $3)
+      FROM reservation_tables rt
+      WHERE rt.table_id = t.id
+        AND rt.status = 'confirmed'
+        AND tstzrange(rt.starts_at, rt.ends_at) && tstzrange($2, $3)
   )
 ORDER BY t.capacity ASC, t.name ASC`
 
@@ -119,11 +160,25 @@ func (r *PostgresRepo) FindCandidates(ctx context.Context, partySize int, starts
 // `status` não é inserido: o DEFAULT 'confirmed' do schema é a única fonte da
 // verdade para o estado inicial. Repetir o literal aqui criaria dois lugares
 // para mudar quando o fluxo ganhar um status novo.
+//
+// `table_id` também sumiu: a coluna ainda existe (a 0007 é que a derruba), mas
+// fica NULL. Quem guarda as mesas agora é reservation_tables.
 const insertSQL = `
 INSERT INTO reservations
-    (table_id, customer_name, customer_phone, party_size, starts_at, ends_at)
-VALUES ($1, $2, $3, $4, $5, $6)
+    (customer_name, customer_phone, party_size, starts_at, ends_at)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING id, status, created_at`
+
+// unnest transforma o array de uuid em N linhas: uma reserva de 3 mesas vira 3
+// linhas de junção num ÚNICO statement, não três round-trips.
+//
+// É AQUI que a EXCLUDE dispara agora. Numa combinação, o INSERT pode falhar por
+// causa da terceira mesa depois de as duas primeiras já terem entrado — e a
+// transação desfaz tudo. Sem ela, você teria uma reserva "meio confirmada",
+// ocupando duas mesas e faltando uma.
+const insertTablesSQL = `
+INSERT INTO reservation_tables (reservation_id, table_id, starts_at, ends_at, status)
+SELECT $1, unnest($2::uuid[]), $3, $4, $5`
 
 // Insert grava a reserva E o evento de notificação na MESMA transação. É o
 // primeiro caso multi-statement do projeto — e o que finalmente justifica a
@@ -145,23 +200,29 @@ func (r *PostgresRepo) Insert(ctx context.Context, res Reservation) (Reservation
 	defer tx.Rollback(ctx)
 
 	err = tx.QueryRow(ctx, insertSQL,
-		res.TableID,
 		res.CustomerName,
 		res.CustomerPhone,
 		res.PartySize,
 		res.StartsAt,
 		res.EndsAt,
 	).Scan(&res.ID, &res.Status, &res.CreatedAt)
+	if err != nil {
+		return Reservation{}, fmt.Errorf("inserindo reserva: %w", err)
+	}
 
-	// A fronteira da Fase 1c: aqui o erro do driver vira erro de domínio, e o
-	// allocator lá em cima decide o que fazer com ele sem nunca ver um pgconn.
-	// O defer acima desfaz a transação abortada pelo 23P01.
+	// A fronteira da Fase 1c, que agora mora aqui: a EXCLUDE mudou de tabela,
+	// mas o código de erro é o MESMO (23P01). Toda a máquina do allocator —
+	// ErrSlotTaken, retry no automático, ErrTableUnavailable no manual —
+	// continua valendo sem uma linha de alteração.
+	_, err = tx.Exec(ctx, insertTablesSQL,
+		res.ID, res.TableIDs, res.StartsAt, res.EndsAt, res.Status)
+
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == pgCodeExclusionViolation {
 		return Reservation{}, ErrSlotTaken
 	}
 	if err != nil {
-		return Reservation{}, fmt.Errorf("inserindo reserva: %w", err)
+		return Reservation{}, fmt.Errorf("associando mesas à reserva: %w", err)
 	}
 
 	if err := notification.Enqueue(ctx, tx, res.ID, notification.KindConfirmed, payloadDe(res)); err != nil {
@@ -185,13 +246,26 @@ func payloadDe(res Reservation) notification.Payload {
 	}
 }
 
-const colunas = `id, table_id, customer_name, customer_phone,
-                 party_size, starts_at, ends_at, status, created_at`
+// A reserva e suas mesas vêm numa consulta só: o array_agg colapsa as linhas de
+// junção numa coluna uuid[].
+//
+// O FILTER + coalesce não são firula. Sem eles, uma reserva sem linha de junção
+// (que não deveria existir, mas o banco não impede) produziria `{NULL}` — um
+// array com um elemento nulo — em vez de `{}`. É a MESMA armadilha do `[]` vs
+// `null` do JSON, agora em SQL: o vazio precisa ser explicitamente vazio.
+const selectReservas = `
+SELECT r.id,
+       coalesce(array_agg(rt.table_id ORDER BY rt.table_id)
+                FILTER (WHERE rt.table_id IS NOT NULL), '{}') AS table_ids,
+       r.customer_name, r.customer_phone, r.party_size,
+       r.starts_at, r.ends_at, r.status, r.created_at
+FROM reservations r
+LEFT JOIN reservation_tables rt ON rt.reservation_id = r.id`
 
 func scanReservation(row pgx.Row) (Reservation, error) {
 	var res Reservation
 	err := row.Scan(
-		&res.ID, &res.TableID, &res.CustomerName, &res.CustomerPhone,
+		&res.ID, &res.TableIDs, &res.CustomerName, &res.CustomerPhone,
 		&res.PartySize, &res.StartsAt, &res.EndsAt, &res.Status, &res.CreatedAt,
 	)
 	return res, err
@@ -199,7 +273,7 @@ func scanReservation(row pgx.Row) (Reservation, error) {
 
 func (r *PostgresRepo) Get(ctx context.Context, id uuid.UUID) (Reservation, error) {
 	res, err := scanReservation(
-		r.db.QueryRow(ctx, `SELECT `+colunas+` FROM reservations WHERE id = $1`, id),
+		r.db.QueryRow(ctx, selectReservas+` WHERE r.id = $1 GROUP BY r.id`, id),
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -223,13 +297,21 @@ type ListFilter struct {
 // O AT TIME ZONE converte o instante (timestamptz) para a hora de parede do
 // restaurante ANTES de extrair a data. Sem ele, o ::date usaria o fuso da
 // sessão (UTC) e a reserva das 22h de sábado apareceria como domingo.
-const listSQL = `
-SELECT ` + colunas + `
-FROM reservations
-WHERE ($1::date IS NULL OR (starts_at AT TIME ZONE $4)::date = $1::date)
-  AND ($2::uuid IS NULL OR table_id = $2)
-  AND ($3::text IS NULL OR status   = $3)
-ORDER BY starts_at`
+//
+// ARMADILHA da Fase 3a: o filtro por mesa usa EXISTS, e não `rt.table_id = $2`.
+// Se ele filtrasse direto no LEFT JOIN, o array_agg veria SÓ a mesa filtrada — e
+// uma reserva combinada nas mesas A e B, consultada por `?table_id=A`, voltaria
+// dizendo que ocupa apenas a mesa A. A resposta estaria errada, e ninguém
+// perceberia, porque ela é plausível. O EXISTS filtra QUAIS RESERVAS aparecem sem
+// mexer em QUAIS MESAS cada uma reporta.
+const listSQL = selectReservas + `
+WHERE ($1::date IS NULL OR (r.starts_at AT TIME ZONE $4)::date = $1::date)
+  AND ($2::uuid IS NULL OR EXISTS (
+        SELECT 1 FROM reservation_tables f
+        WHERE f.reservation_id = r.id AND f.table_id = $2))
+  AND ($3::text IS NULL OR r.status = $3)
+GROUP BY r.id
+ORDER BY r.starts_at`
 
 func (r *PostgresRepo) List(ctx context.Context, f ListFilter) ([]Reservation, error) {
 	rows, err := r.db.Query(ctx, listSQL, f.Date, f.TableID, f.Status, r.serviceTZ)
@@ -261,9 +343,11 @@ func (r *PostgresRepo) List(ctx context.Context, f ListFilter) ([]Reservation, e
 //
 // O predicado é IDÊNTICO ao do índice GIST parcial da constraint. Terceira vez
 // que o índice de integridade serve como índice de leitura de graça.
+// Fase 3a: lê reservation_tables. Uma mesa pode estar ocupada por ser metade de
+// uma combinação — e essa ocupação só existe na tabela de junção.
 const busyWindowsSQL = `
 SELECT starts_at, ends_at
-FROM reservations
+FROM reservation_tables
 WHERE table_id = $1
   AND status = 'confirmed'
   AND tstzrange(starts_at, ends_at) && tstzrange($2, $3)

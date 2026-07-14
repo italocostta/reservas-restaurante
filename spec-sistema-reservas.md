@@ -585,8 +585,9 @@ Para não serem confundidas com esquecimento durante a implementação:
 5. **Sem validação de formato de telefone** — `customer_phone` é texto livre na v1.
 6. **Retry sem backoff** — três tentativas imediatas, sem espera nem jitter. Para o volume de um restaurante é irrelevante; num teste de estresse com dezenas de goroutines, elas martelam o banco em rajada.
 7. **`PATCH /tables/{id}` é last-write-wins** — dois `PATCH` concorrentes na mesma mesa se sobrescrevem em silêncio. Não há `@Version`/optimistic locking. A concorrência que este projeto trata é a de *reservas* (via `EXCLUDE`), não a de edição de mesas.
-8. **`reservation/handler_test.go` não existe.** O `contract_test.go` cobre os status codes, mas não o parsing específico do handler de reservas (formato do `?date=`, enum do `?status=`, UUID do `?table_id=`, `DisallowUnknownFields`, conversão DTO→domínio). Lacuna conhecida, não fechada.
-9. **Nenhuma validação de duração máxima de reserva** — nada impede uma reserva de 12 horas.
+8. **Nenhuma validação de duração máxima de reserva** — nada impede uma reserva de 12 horas.
+
+> **Fechado:** o débito "`reservation/handler_test.go` não existe" foi resolvido. O arquivo cobre o parsing dos filtros (formato do `?date=`, enum do `?status=`, UUID do `?table_id=`), o `DisallowUnknownFields`, a conversão DTO→domínio (`table_id` ausente/null/informado), e — o mais importante — **o invariante do `ErrSlotTaken`**: se ele vazar do allocator, o handler devolve `500` com log de `INVARIANTE VIOLADO`, nunca um `409` disfarçado. Verificado que o teste falha ao mapear `ErrSlotTaken` para `409`, denunciando tanto o status errado quanto o vazamento da mensagem interna no corpo.
 
 ---
 

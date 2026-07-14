@@ -2,93 +2,21 @@ package table
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/getkin/kin-openapi/openapi2"
-	"github.com/getkin/kin-openapi/openapi2conv"
-	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/google/uuid"
+
+	"reservas-restaurante/internal/openapitest"
 )
 
-// carregaSpec lê o swagger.json que o `swag init` gerou. O swaggo v1 emite
-// Swagger 2.0; o validador só fala OpenAPI 3 — daí a conversão.
-func carregaSpec(t *testing.T) *openapi3.T {
-	t.Helper()
-
-	bruto, err := os.ReadFile("../../docs/swagger.json")
-	if err != nil {
-		t.Fatalf("swagger.json ausente — rode `swag init -g cmd/api/main.go -o docs --parseInternal`: %v", err)
-	}
-
-	var v2 openapi2.T
-	if err := json.Unmarshal(bruto, &v2); err != nil {
-		t.Fatalf("swagger.json inválido: %v", err)
-	}
-
-	v3, err := openapi2conv.ToV3(&v2)
-	if err != nil {
-		t.Fatalf("convertendo para OpenAPI 3: %v", err)
-	}
-
-	// Reserializa e recarrega pelo loader: é o que resolve os $ref para os
-	// schemas de components. Sem isso, Schema.Value vem nil.
-	raw, err := json.Marshal(v3)
-	if err != nil {
-		t.Fatalf("reserializando spec: %v", err)
-	}
-	spec, err := openapi3.NewLoader().LoadFromData(raw)
-	if err != nil {
-		t.Fatalf("recarregando spec: %v", err)
-	}
-
-	return spec
-}
-
-// exigeRespostaNoContrato falha se o status devolvido não estiver DECLARADO na
-// anotação do handler, ou se o corpo não bater com o schema declarado.
-// É esta função que impede a documentação de mentir.
-func exigeRespostaNoContrato(t *testing.T, spec *openapi3.T, metodo, rota string, rec *httptest.ResponseRecorder) {
-	t.Helper()
-
-	item := spec.Paths.Find(rota)
-	if item == nil {
-		t.Fatalf("rota %q não existe no swagger.json", rota)
-	}
-	op := item.GetOperation(metodo)
-	if op == nil {
-		t.Fatalf("%s %s não existe no swagger.json", metodo, rota)
-	}
-
-	resp := op.Responses.Status(rec.Code)
-	if resp == nil || resp.Value == nil {
-		t.Fatalf("%s %s devolveu %d, que NÃO está declarado no swagger — a anotação está mentindo",
-			metodo, rota, rec.Code)
-	}
-
-	media := resp.Value.Content.Get("application/json")
-	if media == nil || media.Schema == nil || media.Schema.Value == nil {
-		return // resposta declarada sem corpo
-	}
-
-	var corpo any
-	if err := json.Unmarshal(rec.Body.Bytes(), &corpo); err != nil {
-		t.Fatalf("%s %s (%d): corpo não é JSON válido: %v", metodo, rota, rec.Code, err)
-	}
-
-	if err := media.Schema.Value.VisitJSON(corpo); err != nil {
-		t.Errorf("%s %s (%d): corpo não bate com o schema declarado: %v\ncorpo: %s",
-			metodo, rota, rec.Code, err, rec.Body)
-	}
-}
+const caminhoSwagger = "../../docs/swagger.json"
 
 func TestRespostasBatemComOSwagger(t *testing.T) {
-	spec := carregaSpec(t)
+	spec := openapitest.LoadSpec(t, caminhoSwagger)
 
 	id := uuid.New()
 	mesa := Table{ID: id, Name: "Mesa 12", Capacity: 4, IsActive: true, CreatedAt: time.Now()}
@@ -178,7 +106,7 @@ func TestRespostasBatemComOSwagger(t *testing.T) {
 
 			tc.chama(NewHandler(tc.repo), rec, tc.req)
 
-			exigeRespostaNoContrato(t, spec, tc.metodo, tc.rota, rec)
+			openapitest.RequireInContract(t, spec, tc.metodo, tc.rota, rec)
 		})
 	}
 }

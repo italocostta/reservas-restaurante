@@ -1,0 +1,172 @@
+basePath: /
+definitions:
+  httpx.ErrorResponse:
+    properties:
+      error:
+        example: Grupo de 6 pessoas excede a capacidade da mesa (4).
+        type: string
+    type: object
+  table.Table:
+    properties:
+      capacity:
+        type: integer
+      created_at:
+        type: string
+      id:
+        type: string
+      is_active:
+        type: boolean
+      name:
+        type: string
+    type: object
+  table.createRequest:
+    properties:
+      capacity:
+        example: 4
+        type: integer
+      name:
+        example: Mesa 12
+        type: string
+    type: object
+  table.updateRequest:
+    properties:
+      capacity:
+        example: 6
+        type: integer
+      is_active:
+        example: false
+        type: boolean
+      name:
+        example: Mesa 12
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: Backend de reservas de mesas de um restaurante único. Staff cria reservas;
+    o sistema aloca mesa automaticamente respeitando capacidade e evitando sobreposição
+    de horário.
+  title: API de Reservas de Restaurante
+  version: "1.0"
+paths:
+  /tables:
+    get:
+      description: Lista as mesas. Sem o parâmetro `active`, devolve todas — ativas
+        e inativas.
+      parameters:
+      - description: Filtra por mesas ativas (true) ou inativas (false). Omitido =
+          sem filtro
+        in: query
+        name: active
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/table.Table'
+            type: array
+        "400":
+          description: Parâmetro active não é booleano
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+      summary: Lista mesas
+      tags:
+      - mesas
+    post:
+      consumes:
+      - application/json
+      description: Cadastra uma mesa nova. O nome é único no restaurante.
+      parameters:
+      - description: Dados da mesa
+        in: body
+        name: mesa
+        required: true
+        schema:
+          $ref: '#/definitions/table.createRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/table.Table'
+        "400":
+          description: Corpo inválido, nome vazio ou capacidade fora do intervalo
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+        "409":
+          description: Já existe mesa com esse nome
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+      summary: Cria uma mesa
+      tags:
+      - mesas
+  /tables/{id}:
+    get:
+      parameters:
+      - description: ID da mesa (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/table.Table'
+        "400":
+          description: ID não é um UUID
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+        "404":
+          description: Mesa não encontrada
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+      summary: Detalha uma mesa
+      tags:
+      - mesas
+    patch:
+      consumes:
+      - application/json
+      description: 'Atualização parcial: só os campos enviados são alterados. Enviar
+        `{"is_active": false}` desativa a mesa.'
+      parameters:
+      - description: ID da mesa (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Campos a alterar (ao menos um)
+        in: body
+        name: mesa
+        required: true
+        schema:
+          $ref: '#/definitions/table.updateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/table.Table'
+        "400":
+          description: Corpo vazio, ID inválido ou valor fora do intervalo
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+        "404":
+          description: Mesa não encontrada
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+        "409":
+          description: Já existe mesa com o novo nome
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+      summary: Atualiza uma mesa
+      tags:
+      - mesas
+swagger: "2.0"

@@ -18,6 +18,11 @@ import (
 	"reservas-restaurante/internal/table"
 )
 
+//	@title			API de Reservas de Restaurante
+//	@version		1.0
+//	@description	Backend de reservas de mesas de um restaurante único. Staff cria reservas; o sistema aloca mesa automaticamente respeitando capacidade e evitando sobreposição de horário.
+//	@host			localhost:8080
+//	@BasePath		/
 func main() {
 	if err := run(); err != nil {
 		slog.Error("aplicação encerrada com erro", "erro", err)

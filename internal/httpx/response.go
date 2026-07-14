@@ -11,11 +11,16 @@ import (
 	"net/http"
 )
 
-// errorBody é o formato de erro da v1: só mensagem humana, sem código
+// ErrorResponse é o formato de erro da v1: só mensagem humana, sem código
 // machine-readable. Migrar para código estruturado é breaking change de
 // contrato — débito técnico intencional #1 da spec.
-type errorBody struct {
-	Error string `json:"error"`
+//
+// Era `errorBody`, não exportado, para que nenhum handler pudesse inventar
+// outro formato. Foi exportado porque o swaggo não referencia tipo privado nas
+// anotações @Failure. O invariante segue valendo por convenção: todo erro sai
+// por httpx.Error, nunca construindo esta struct na mão.
+type ErrorResponse struct {
+	Error string `json:"error" example:"Grupo de 6 pessoas excede a capacidade da mesa (4)."`
 }
 
 func JSON(w http.ResponseWriter, status int, payload any) {
@@ -33,5 +38,5 @@ func JSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func Error(w http.ResponseWriter, status int, message string) {
-	JSON(w, status, errorBody{Error: message})
+	JSON(w, status, ErrorResponse{Error: message})
 }

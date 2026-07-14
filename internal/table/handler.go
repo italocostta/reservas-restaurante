@@ -35,10 +35,22 @@ func NewHandler(repo repository) *Handler {
 }
 
 type createRequest struct {
-	Name     string `json:"name"`
-	Capacity int    `json:"capacity"`
+	Name     string `json:"name"     example:"Mesa 12"`
+	Capacity int    `json:"capacity" example:"4"`
 }
 
+// Create godoc
+//
+//	@Summary		Cria uma mesa
+//	@Description	Cadastra uma mesa nova. O nome é único no restaurante.
+//	@Tags			mesas
+//	@Accept			json
+//	@Produce		json
+//	@Param			mesa	body		createRequest	true	"Dados da mesa"
+//	@Success		201		{object}	Table
+//	@Failure		400		{object}	httpx.ErrorResponse	"Corpo inválido, nome vazio ou capacidade fora do intervalo"
+//	@Failure		409		{object}	httpx.ErrorResponse	"Já existe mesa com esse nome"
+//	@Router			/tables [post]
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createRequest
 
@@ -77,6 +89,16 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusCreated, t)
 }
 
+// List godoc
+//
+//	@Summary		Lista mesas
+//	@Description	Lista as mesas. Sem o parâmetro `active`, devolve todas — ativas e inativas.
+//	@Tags			mesas
+//	@Produce		json
+//	@Param			active	query		bool	false	"Filtra por mesas ativas (true) ou inativas (false). Omitido = sem filtro"
+//	@Success		200		{array}		Table
+//	@Failure		400		{object}	httpx.ErrorResponse	"Parâmetro active não é booleano"
+//	@Router			/tables [get]
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	// nil = sem filtro. Só vira ponteiro se o parâmetro veio de fato.
 	var active *bool
@@ -99,6 +121,16 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, tables)
 }
 
+// Get godoc
+//
+//	@Summary	Detalha uma mesa
+//	@Tags		mesas
+//	@Produce	json
+//	@Param		id	path		string	true	"ID da mesa (UUID)"
+//	@Success	200	{object}	Table
+//	@Failure	400	{object}	httpx.ErrorResponse	"ID não é um UUID"
+//	@Failure	404	{object}	httpx.ErrorResponse	"Mesa não encontrada"
+//	@Router		/tables/{id} [get]
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
@@ -124,11 +156,25 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 // Sem isso, {"is_active": false} seria indistinguível de um PATCH que nem
 // mencionou is_active — e desativar mesa é exatamente o caso de uso do PATCH.
 type updateRequest struct {
-	Name     *string `json:"name"`
-	Capacity *int    `json:"capacity"`
-	IsActive *bool   `json:"is_active"`
+	Name     *string `json:"name"      example:"Mesa 12"`
+	Capacity *int    `json:"capacity"  example:"6"`
+	IsActive *bool   `json:"is_active" example:"false"`
 }
 
+// Update godoc
+//
+//	@Summary		Atualiza uma mesa
+//	@Description	Atualização parcial: só os campos enviados são alterados. Enviar `{"is_active": false}` desativa a mesa.
+//	@Tags			mesas
+//	@Accept			json
+//	@Produce		json
+//	@Param			id		path		string			true	"ID da mesa (UUID)"
+//	@Param			mesa	body		updateRequest	true	"Campos a alterar (ao menos um)"
+//	@Success		200		{object}	Table
+//	@Failure		400		{object}	httpx.ErrorResponse	"Corpo vazio, ID inválido ou valor fora do intervalo"
+//	@Failure		404		{object}	httpx.ErrorResponse	"Mesa não encontrada"
+//	@Failure		409		{object}	httpx.ErrorResponse	"Já existe mesa com o novo nome"
+//	@Router			/tables/{id} [patch]
 func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {

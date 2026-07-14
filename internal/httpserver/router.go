@@ -3,6 +3,12 @@ package httpserver
 import (
 	"net/http"
 
+	httpSwagger "github.com/swaggo/http-swagger/v2"
+
+	// Import em branco: o init() do pacote gerado registra o swagger.json no
+	// swaggo. Nada aqui referencia um identificador de `docs` diretamente.
+	_ "reservas-restaurante/docs"
+
 	"reservas-restaurante/internal/config"
 	"reservas-restaurante/internal/httpx"
 	"reservas-restaurante/internal/table"
@@ -25,6 +31,10 @@ func New(cfg config.Config, tables *table.Handler) http.Handler {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+
+	// A barra final faz o ServeMux casar tudo abaixo de /swagger/ — a UI puxa
+	// vários arquivos (index.html, doc.json, os assets).
+	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)
 
 	// Ordem de fora para dentro. Logger é o mais externo de propósito: com
 	// Recover logo abaixo dele, uma requisição que dá panic produz DUAS linhas

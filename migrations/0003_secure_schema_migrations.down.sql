@@ -1,0 +1,1 @@
+ALTER TABLE schema_migrations DISABLE ROW LEVEL SECURITY;

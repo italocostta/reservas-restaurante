@@ -104,7 +104,7 @@ func TestRespostasBatemComOSwagger(t *testing.T) {
 		t.Run(tc.nome, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 
-			tc.chama(NewHandler(tc.repo), rec, tc.req)
+			tc.chama(NewHandler(tc.repo, agendaVazia()), rec, tc.req)
 
 			openapitest.RequireInContract(t, spec, tc.metodo, tc.rota, rec)
 		})

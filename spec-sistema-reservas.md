@@ -632,7 +632,7 @@ Para não serem confundidas com esquecimento durante a implementação:
 4. **Sem autenticação** — staff assumido confiável; toda a API em Go é aberta nesta fase. **Isto não vale para o PostgREST do Supabase**, que foi fechado com RLS (seção 7) — lá a exposição seria involuntária, não uma decisão.
 5. **Sem validação de formato de telefone** — `customer_phone` é texto livre na v1.
 6. **Retry sem backoff** — três tentativas imediatas, sem espera nem jitter. Para o volume de um restaurante é irrelevante; num teste de estresse com dezenas de goroutines, elas martelam o banco em rajada.
-7. **`PATCH /tables/{id}` é last-write-wins** — dois `PATCH` concorrentes na mesma mesa se sobrescrevem em silêncio. Não há `@Version`/optimistic locking. A concorrência que este projeto trata é a de *reservas* (via `EXCLUDE`), não a de edição de mesas.
+7. **`PATCH /tables/{id}` é last-write-wins** — dois `PATCH` concorrentes na mesma mesa se sobrescrevem em silêncio. Não há `@Version`/optimistic locking. A concorrência que este projeto trata é a de *reservas* (via `EXCLUDE`), não a de edição de mesas. **Relacionado:** a checagem de "não desativar mesa com reserva" (seção 15) é um *check-then-act* com a mesma natureza — janela de corrida aceita, sem constraint no banco para ampará-la.
 8. **Nenhuma validação de duração máxima de reserva** — nada impede uma reserva de 12 horas.
 9. **Entrega `at-least-once`, não `exactly-once`** (Fase 2). Se o `Send` funciona e o `MarkSent` falha, a notificação é enviada de novo quando o visibility timeout devolver a linha. **Isto não tem conserto:** `exactly-once` exigiria commit atômico entre o Postgres e o provedor de SMS — um 2PC entre sistemas que não se conhecem. Todo sistema de fila honesto entrega `at-least-once` e empurra a idempotência para o consumidor final.
 10. **Fila por polling, não por `LISTEN/NOTIFY`** — a notificação sai com até `PollInterval` (2s) de atraso, e o banco é consultado mesmo quando não há nada a fazer. O `LISTEN/NOTIFY` do Postgres eliminaria a espera, ao custo de uma conexão dedicada e de um caminho de reconexão a manter.
@@ -909,6 +909,45 @@ A seção 4 usou o princípio *"a URL não é a fronteira do domínio"* para jus
 Adicionar `DayGrid` à interface `schedule` do handler **quebrou o `fakeSchedule` dos testes** — e o `go build ./...` passou. Ou seja: o código de produção estava íntegro, e a única coisa desatualizada era o dublê. O compilador apontou para ele, e para mais nada.
 
 **Um `Mockito.mock()` teria ficado verde**, gerando o método novo sozinho, devolvendo `null`, e ignorando a capacidade nova em silêncio. Fake escrito à mão é uma struct que implementa uma interface de verdade: **método novo na interface é erro de compilação, sem exceção.** É o segundo dividendo da mesma decisão de arquitetura (seção 14, `TableID` → `TableIDs`).
+
+### O buraco que a primeira tela revelou
+
+**Dava para desativar uma mesa com reserva confirmada em cima.** O `PATCH /tables/{id}` não olhava reservas: a mesa sumia da agenda, e a reserva continuava de pé, `confirmed`, apontando para uma mesa que o sistema considerava fora de operação. O cliente aparecia às 20h, a mesa não estava no quadro, e ninguém tinha sido avisado.
+
+**O bug sempre esteve lá.** Construir o botão "Desativar" não o criou — só o colocou a um clique de distância de um humano com um mouse. É a segunda vez nesta seção que o consumidor prova algo que o backend sozinho não tinha como provar.
+
+#### Onde a checagem mora, e por que não no banco
+
+O critério é o mesmo que justificou o trigger da Fase 3a, aplicado ao contrário:
+
+> **Invariante que precisa valer independentemente de quem escreve mora no banco. Regra de negócio que só a aplicação aplica mora na aplicação.**
+
+Uma migration futura pode legitimamente precisar desativar uma mesa. Isto é **regra de negócio**, não invariante estrutural — e portanto não vira `CHECK` nem trigger.
+
+#### A interface atravessa a fronteira no sentido contrário
+
+`table` não pode importar `reservation` — é a assimetria que sustenta a organização por domínio (seção 6). Mas a restrição *vem* de reservas.
+
+A saída é o padrão que o projeto já usa três vezes, agora invertido: **`table` declara a interface de que precisa**, sem nomear o outro pacote.
+
+```go
+// table/handler.go — e não há import de `reservation` aqui
+type agenda interface {
+    ContarReservasFuturas(ctx context.Context, tableID uuid.UUID) (int, error)
+}
+```
+
+O `*reservation.PostgresRepo` a satisfaz **sem nunca ter ouvido falar dela**. O acoplamento é real, e mora num único argumento de construtor no `main.go`, onde dá para vê-lo. Em Spring seria um `@Autowired` num campo, e a dependência entre os dois domínios ficaria invisível até alguém rodar o grafo de beans.
+
+#### Três decisões dentro da checagem
+
+1. **`ends_at > now()`, e não `starts_at > now()`.** A reserva que está **acontecendo agora** — entrou às 19h, sai às 21h, e são 20h — é a mais grave de todas. Filtrar por `starts_at` deixaria passar exatamente o caso em que há gente sentada.
+2. **Só a desativação é barrada.** Renomear e mudar capacidade continuam livres: não fazem a mesa sumir de lugar nenhum. Barrá-las transformaria uma proteção em burocracia. **Reativar nunca consulta a agenda** — pôr uma mesa de volta em operação não pode quebrar nada, e uma checagem ali tornaria impossível desfazer uma desativação feita por engano.
+3. **Falha ao contar vira `500`, nunca `409`.** Um erro de banco na contagem significa *"não sei se pode"*, e responder *"não pode"* seria mentir com confiança.
+
+#### A corrida que fica, e é aceita
+
+É um *check-then-act*: alguém pode criar uma reserva entre a contagem e o `UPDATE`. Ao contrário do overbooking, **esta corrida não tem constraint no banco para ampará-la** — e a spec não vai fingir que tem. É uma janela de milissegundos numa operação que o staff faz uma vez por semestre, contra um dano recuperável (reativar a mesa). Aceito, e registrado aqui em vez de escondido.
 
 ### Débito técnico novo
 

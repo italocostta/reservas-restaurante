@@ -67,12 +67,24 @@ func run() error {
 	// reflexão, sem scan de pacote, sem anotação: construtores chamados na ordem
 	// em que as dependências existem.
 	tableRepo := table.NewPostgresRepo(pool)
-	tableHandler := table.NewHandler(tableRepo)
 
 	// reservationRepo entra DUAS VEZES no allocator — como TableFinder e como
 	// ReservationCreator. É a mesma struct, fatiada por duas interfaces pequenas
 	// que o allocator declarou. Ele não sabe que é o mesmo objeto, e não precisa.
 	reservationRepo := reservation.NewPostgresRepo(pool, cfg.ServiceTZ)
+
+	// E aqui ela entra uma TERCEIRA vez, agora atravessando a fronteira no sentido
+	// contrário: o table.Handler precisa saber se uma mesa tem reserva futura antes
+	// de deixar alguém desativá-la.
+	//
+	// Repare no que NÃO aconteceu: o pacote `table` não importou `reservation`. Ele
+	// declarou uma interface de um método (`agenda`) descrevendo a pergunta que
+	// precisa fazer, e o *reservation.PostgresRepo a satisfaz sem nunca ter ouvido
+	// falar dela. O acoplamento existe, é real, e mora AQUI — num único argumento de
+	// construtor, onde dá para vê-lo. Em Spring isso seria um @Autowired num campo,
+	// e a dependência entre os dois domínios ficaria invisível até alguém rodar o
+	// grafo de beans.
+	tableHandler := table.NewHandler(tableRepo, reservationRepo)
 
 	// Aqui é onde a Config (infra) vira ServiceHours (domínio). O pacote
 	// reservation não importa config: quem traduz é o main.go.

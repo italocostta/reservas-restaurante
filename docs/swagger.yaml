@@ -430,7 +430,8 @@ paths:
           schema:
             $ref: '#/definitions/httpx.ErrorResponse'
         "409":
-          description: Já existe mesa com o novo nome
+          description: Já existe mesa com o novo nome, ou a mesa tem reservas confirmadas
+            e não pode ser desativada
           schema:
             $ref: '#/definitions/httpx.ErrorResponse'
       summary: Atualiza uma mesa

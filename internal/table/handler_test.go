@@ -3,6 +3,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,6 +44,25 @@ func (f *fakeRepo) Update(ctx context.Context, id uuid.UUID, p UpdateParams) (Ta
 	return f.updateFn(ctx, id, p)
 }
 
+// fakeAgenda dubla o lado das RESERVAS, que este pacote não conhece. Repare que o
+// teste não importa `reservation` para isto: a interface `agenda` tem um método, e
+// implementá-la é escrever esse método. É a mesma razão de o fake do repositório
+// existir — só que agora atravessando a fronteira entre dois domínios.
+type fakeAgenda struct {
+	n     int   // quantas reservas futuras a mesa tem
+	err   error // falha ao contar
+	calls int
+}
+
+func (f *fakeAgenda) ContarReservasFuturas(context.Context, uuid.UUID) (int, error) {
+	f.calls++
+	return f.n, f.err
+}
+
+// agendaVazia é o dublê padrão: mesa sem compromisso. Todo teste que NÃO é sobre
+// desativação usa este, e a contagem nem chega a ser chamada.
+func agendaVazia() *fakeAgenda { return &fakeAgenda{} }
+
 func ptr[T any](v T) *T { return &v }
 
 func TestCreate(t *testing.T) {
@@ -76,7 +96,7 @@ func TestCreate(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/tables", bytes.NewBufferString(tc.body))
 			rec := httptest.NewRecorder()
 
-			NewHandler(repo).Create(rec, req)
+			NewHandler(repo, agendaVazia()).Create(rec, req)
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, quero %d (corpo: %s)", rec.Code, tc.wantStatus, rec.Body)
@@ -98,7 +118,7 @@ func TestCreateAparaEspacosDoNome(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/tables", strings.NewReader(`{"name":"  Mesa 12  ","capacity":4}`))
-	NewHandler(repo).Create(httptest.NewRecorder(), req)
+	NewHandler(repo, agendaVazia()).Create(httptest.NewRecorder(), req)
 
 	if recebido != "Mesa 12" {
 		t.Errorf("repositório recebeu %q, quero %q", recebido, "Mesa 12")
@@ -113,7 +133,7 @@ func TestListVaziaSerializaComoArray(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	NewHandler(repo).List(rec, httptest.NewRequest(http.MethodGet, "/tables", nil))
+	NewHandler(repo, agendaVazia()).List(rec, httptest.NewRequest(http.MethodGet, "/tables", nil))
 
 	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
 		t.Errorf("corpo = %s, quero []", got)
@@ -147,7 +167,7 @@ func TestListFiltroActive(t *testing.T) {
 			}
 
 			rec := httptest.NewRecorder()
-			NewHandler(repo).List(rec, httptest.NewRequest(http.MethodGet, tc.url, nil))
+			NewHandler(repo, agendaVazia()).List(rec, httptest.NewRequest(http.MethodGet, tc.url, nil))
 
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status = %d, quero %d", rec.Code, tc.wantStatus)
@@ -199,7 +219,7 @@ func TestGet(t *testing.T) {
 			req.SetPathValue("id", tc.id)
 			rec := httptest.NewRecorder()
 
-			NewHandler(repo).Get(rec, req)
+			NewHandler(repo, agendaVazia()).Get(rec, req)
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, quero %d (corpo: %s)", rec.Code, tc.wantStatus, rec.Body)
@@ -229,7 +249,7 @@ func TestUpdateDesativarMesa(t *testing.T) {
 	req.SetPathValue("id", id.String())
 	rec := httptest.NewRecorder()
 
-	NewHandler(repo).Update(rec, req)
+	NewHandler(repo, agendaVazia()).Update(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, quero 200 (corpo: %s)", rec.Code, rec.Body)
@@ -277,7 +297,7 @@ func TestUpdate(t *testing.T) {
 			req.SetPathValue("id", id.String())
 			rec := httptest.NewRecorder()
 
-			NewHandler(repo).Update(rec, req)
+			NewHandler(repo, agendaVazia()).Update(rec, req)
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, quero %d (corpo: %s)", rec.Code, tc.wantStatus, rec.Body)
@@ -286,5 +306,124 @@ func TestUpdate(t *testing.T) {
 				t.Errorf("repositório chamado %d vez(es), quero %d", repo.calls, tc.wantCalls)
 			}
 		})
+	}
+}
+
+// ---------- Débito 17: desativar mesa com reserva confirmada ----------
+//
+// Desativar uma mesa com reserva em cima some com a mesa da agenda e deixa a
+// reserva de pé, apontando para uma mesa fora de operação. O cliente aparece às
+// 20h, a mesa não está no quadro, e ninguém foi avisado.
+
+func TestUpdateNaoDesativaMesaComReserva(t *testing.T) {
+	casos := []struct {
+		nome         string
+		corpo        string
+		reservas     int
+		wantStatus   int
+		wantContagem int // a agenda foi consultada?
+		wantUpdate   int // o repositório chegou a ser tocado?
+	}{
+		{
+			// O caso do débito 17.
+			nome: "desativar com reserva futura → 409, sem tocar no banco",
+			corpo: `{"is_active":false}`, reservas: 3,
+			wantStatus: http.StatusConflict, wantContagem: 1, wantUpdate: 0,
+		},
+		{
+			nome: "desativar mesa livre → 200",
+			corpo: `{"is_active":false}`, reservas: 0,
+			wantStatus: http.StatusOK, wantContagem: 1, wantUpdate: 1,
+		},
+		{
+			// REATIVAR nunca consulta a agenda: pôr uma mesa de volta em operação não
+			// pode quebrar nada. Se este caso passar a chamar a contagem, é porque
+			// alguém trocou `!*req.IsActive` por `req.IsActive != nil` — e aí a mesa
+			// desativada por engano viraria impossível de reativar.
+			nome: "REATIVAR não consulta a agenda",
+			corpo: `{"is_active":true}`, reservas: 99,
+			wantStatus: http.StatusOK, wantContagem: 0, wantUpdate: 1,
+		},
+		{
+			// Renomear e mudar capacidade não fazem a mesa sumir de lugar nenhum.
+			// Barrá-las seria transformar uma proteção em burocracia.
+			nome: "renomear mesa COM reserva continua livre",
+			corpo: `{"name":"Mesa 12-A"}`, reservas: 3,
+			wantStatus: http.StatusOK, wantContagem: 0, wantUpdate: 1,
+		},
+		{
+			nome: "mudar capacidade de mesa COM reserva continua livre",
+			corpo: `{"capacity":6}`, reservas: 3,
+			wantStatus: http.StatusOK, wantContagem: 0, wantUpdate: 1,
+		},
+	}
+
+	for _, tc := range casos {
+		t.Run(tc.nome, func(t *testing.T) {
+			id := uuid.New()
+			repo := &fakeRepo{
+				updateFn: func(_ context.Context, _ uuid.UUID, _ UpdateParams) (Table, error) {
+					return Table{ID: id}, nil
+				},
+			}
+			ag := &fakeAgenda{n: tc.reservas}
+
+			req := httptest.NewRequest(http.MethodPatch, "/tables/"+id.String(), strings.NewReader(tc.corpo))
+			req.SetPathValue("id", id.String())
+			rec := httptest.NewRecorder()
+
+			NewHandler(repo, ag).Update(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, quero %d (corpo: %s)", rec.Code, tc.wantStatus, rec.Body)
+			}
+			if ag.calls != tc.wantContagem {
+				t.Errorf("agenda consultada %d vez(es), quero %d", ag.calls, tc.wantContagem)
+			}
+			if repo.calls != tc.wantUpdate {
+				t.Errorf("repositório chamado %d vez(es), quero %d — o 409 tem que barrar ANTES do UPDATE",
+					repo.calls, tc.wantUpdate)
+			}
+		})
+	}
+}
+
+// A mensagem é lida por uma pessoa com o telefone no ombro: precisa dizer QUANTAS
+// reservas e O QUE fazer. "Conflito" não é resposta.
+func TestUpdateMensagemDo409DizQuantasEOQueFazer(t *testing.T) {
+	id := uuid.New()
+	rec := httptest.NewRecorder()
+
+	req := httptest.NewRequest(http.MethodPatch, "/tables/"+id.String(), strings.NewReader(`{"is_active":false}`))
+	req.SetPathValue("id", id.String())
+
+	NewHandler(&fakeRepo{}, &fakeAgenda{n: 1}).Update(rec, req)
+
+	corpo := rec.Body.String()
+	if !strings.Contains(corpo, "1 reserva") || strings.Contains(corpo, "1 reservas") {
+		t.Errorf("mensagem = %s — quero o singular \"1 reserva\", não \"1 reservas\"", corpo)
+	}
+	if !strings.Contains(corpo, "Cancele") {
+		t.Errorf("mensagem = %s — precisa dizer o que fazer, não só que deu errado", corpo)
+	}
+}
+
+// Falhar ao CONTAR não pode virar 409. Um erro de banco na contagem significa "não
+// sei se pode" — responder "não pode" seria mentir com confiança.
+func TestUpdateErroAoContarVira500ENao409(t *testing.T) {
+	id := uuid.New()
+	rec := httptest.NewRecorder()
+
+	req := httptest.NewRequest(http.MethodPatch, "/tables/"+id.String(), strings.NewReader(`{"is_active":false}`))
+	req.SetPathValue("id", id.String())
+
+	repo := &fakeRepo{}
+	NewHandler(repo, &fakeAgenda{err: errors.New("banco caiu")}).Update(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, quero 500 — \"não sei contar\" ≠ \"não pode desativar\"", rec.Code)
+	}
+	if repo.calls != 0 {
+		t.Error("o UPDATE não pode acontecer quando a contagem falhou")
 	}
 }

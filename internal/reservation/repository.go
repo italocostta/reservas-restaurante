@@ -461,6 +461,44 @@ func (r *PostgresRepo) BusyWindowsAll(ctx context.Context, from, to time.Time) (
 	return porMesa, nil
 }
 
+// `ends_at > now()` e não `starts_at > now()`: a reserva que está ACONTECENDO
+// agora — entrou às 19h, sai às 21h, e são 20h — é a mais grave de todas para
+// desativar a mesa embaixo. Filtrar por starts_at deixaria passar exatamente o
+// caso em que há gente sentada.
+//
+// O now() é do BANCO, e não um parâmetro vindo do Clock injetável. Aqui isso é
+// certo: o Clock existe para que a VALIDAÇÃO de "starts_at no passado" seja
+// testável sem datas que expiram (seção 3 da spec). Esta contagem não é validação
+// de entrada do usuário — é uma leitura do estado do mundo, e o relógio do mundo é
+// o do banco.
+const contarReservasFuturasSQL = `
+SELECT count(*)
+FROM reservation_tables
+WHERE table_id = $1
+  AND status = 'confirmed'
+  AND ends_at > now()`
+
+// ContarReservasFuturas responde a UMA pergunta, feita por OUTRO domínio: "posso
+// desativar esta mesa?".
+//
+// O pacote `table` não sabe que reservas existem — é a assimetria que sustenta a
+// organização por domínio (seção 6). Mas a restrição vem de reservas. A saída é a
+// mesma de sempre neste projeto: `table` DECLARA a interface de que precisa, sem
+// nomear este pacote, e o main.go costura. Ninguém importa ninguém.
+//
+// Lê reservation_tables e não reservations: uma mesa pode estar ocupada por ser
+// METADE de uma combinação (Fase 3a), e essa ocupação só existe na tabela de
+// junção.
+func (r *PostgresRepo) ContarReservasFuturas(ctx context.Context, tableID uuid.UUID) (int, error) {
+	var n int
+
+	if err := r.db.QueryRow(ctx, contarReservasFuturasSQL, tableID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("contando reservas futuras da mesa %s: %w", tableID, err)
+	}
+
+	return n, nil
+}
+
 // Cancel é o soft delete: a linha fica, sai do índice parcial da EXCLUDE (que só
 // indexa status='confirmed') e libera o horário.
 //

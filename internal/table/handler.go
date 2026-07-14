@@ -26,12 +26,27 @@ type repository interface {
 	Update(ctx context.Context, id uuid.UUID, p UpdateParams) (Table, error)
 }
 
-type Handler struct {
-	repo repository
+// agenda é a única coisa que este pacote sabe sobre reservas — e repare que ele
+// NÃO sabe: não há import de `reservation` aqui, e não pode haver. O pacote table
+// não conhece a existência de uma reserva, e é essa assimetria que sustenta a
+// organização por domínio (seção 6 da spec).
+//
+// O que ele conhece é uma PERGUNTA que precisa fazer a alguém: "esta mesa tem
+// compromisso?". Quem responde é problema do main.go — na prática, o
+// reservation.PostgresRepo, que satisfaz esta interface sem nunca ter ouvido falar
+// dela. É o mesmo padrão do TableFinder e do ScheduleReader, agora atravessando a
+// fronteira no sentido contrário.
+type agenda interface {
+	ContarReservasFuturas(ctx context.Context, tableID uuid.UUID) (int, error)
 }
 
-func NewHandler(repo repository) *Handler {
-	return &Handler{repo: repo}
+type Handler struct {
+	repo   repository
+	agenda agenda
+}
+
+func NewHandler(repo repository, ag agenda) *Handler {
+	return &Handler{repo: repo, agenda: ag}
 }
 
 type createRequest struct {
@@ -173,7 +188,7 @@ type updateRequest struct {
 //	@Success		200		{object}	Table
 //	@Failure		400		{object}	httpx.ErrorResponse	"Corpo vazio, ID inválido ou valor fora do intervalo"
 //	@Failure		404		{object}	httpx.ErrorResponse	"Mesa não encontrada"
-//	@Failure		409		{object}	httpx.ErrorResponse	"Já existe mesa com o novo nome"
+//	@Failure		409		{object}	httpx.ErrorResponse	"Já existe mesa com o novo nome, ou a mesa tem reservas confirmadas e não pode ser desativada"
 //	@Router			/tables/{id} [patch]
 func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
@@ -211,6 +226,33 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// DESATIVAR uma mesa com reserva confirmada em cima some com a mesa da agenda e
+	// deixa a reserva de pé, apontando para uma mesa fora de operação. O cliente
+	// aparece às 20h, a mesa não está no quadro, e ninguém foi avisado.
+	//
+	// Só barra a DESATIVAÇÃO. Renomear a mesa ou mudar a capacidade continua livre —
+	// são operações que não fazem a mesa desaparecer de lugar nenhum.
+	//
+	// Isto é uma verificação-e-depois-ação, e portanto tem uma corrida: alguém pode
+	// criar uma reserva entre a contagem e o UPDATE. Ao contrário do overbooking,
+	// esta corrida NÃO tem constraint no banco para ampará-la — e não vou fingir que
+	// tem. É uma janela de milissegundos numa operação que o staff faz uma vez por
+	// semestre, contra um dano recuperável (reativar a mesa). Aceito, e registrado.
+	if req.IsActive != nil && !*req.IsActive {
+		n, err := h.agenda.ContarReservasFuturas(r.Context(), id)
+		if err != nil {
+			slog.Error("contando reservas da mesa", "erro", err, "id", id)
+			httpx.Error(w, http.StatusInternalServerError, "erro interno.")
+			return
+		}
+		if n > 0 {
+			httpx.Error(w, http.StatusConflict, fmt.Sprintf(
+				"esta mesa tem %s confirmada(s) e não pode ser desativada. Cancele-a(s) antes.",
+				pluralReservas(n)))
+			return
+		}
+	}
+
 	t, err := h.repo.Update(r.Context(), id, params)
 	switch {
 	case errors.Is(err, ErrNotFound):
@@ -226,4 +268,13 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.JSON(w, http.StatusOK, t)
+}
+
+// A mensagem de erro é lida por uma pessoa com o telefone no ombro. "1 reservas"
+// custa meio segundo de tropeço na leitura, e meio segundo importa no passe.
+func pluralReservas(n int) string {
+	if n == 1 {
+		return "1 reserva"
+	}
+	return fmt.Sprintf("%d reservas", n)
 }

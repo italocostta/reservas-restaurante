@@ -215,6 +215,44 @@ func (r *PostgresRepo) List(ctx context.Context, f ListFilter) ([]Reservation, e
 	return reservas, nil
 }
 
+// BusyWindows devolve as reservas confirmed da mesa que intersectam a janela.
+//
+// Sem AT TIME ZONE aqui, ao contrário do listSQL: quem converteu "o dia" em
+// instantes foi o Go (Schedule.expedienteDe), então $2 e $3 já chegam como
+// timestamptz. O SQL só compara instantes, que é o que ele faz bem.
+//
+// O predicado é IDÊNTICO ao do índice GIST parcial da constraint. Terceira vez
+// que o índice de integridade serve como índice de leitura de graça.
+const busyWindowsSQL = `
+SELECT starts_at, ends_at
+FROM reservations
+WHERE table_id = $1
+  AND status = 'confirmed'
+  AND tstzrange(starts_at, ends_at) && tstzrange($2, $3)
+ORDER BY starts_at`
+
+func (r *PostgresRepo) BusyWindows(ctx context.Context, tableID uuid.UUID, from, to time.Time) ([]Window, error) {
+	rows, err := r.db.Query(ctx, busyWindowsSQL, tableID, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("buscando janelas ocupadas: %w", err)
+	}
+	defer rows.Close()
+
+	ocupadas := []Window{}
+	for rows.Next() {
+		var w Window
+		if err := rows.Scan(&w.StartsAt, &w.EndsAt); err != nil {
+			return nil, fmt.Errorf("lendo janela ocupada: %w", err)
+		}
+		ocupadas = append(ocupadas, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("buscando janelas ocupadas: %w", err)
+	}
+
+	return ocupadas, nil
+}
+
 // Cancel é o soft delete: a linha fica, sai do índice parcial da EXCLUDE (que
 // só indexa status='confirmed') e libera o horário. É idempotente — cancelar
 // duas vezes devolve sucesso, porque o resultado desejado já é o vigente.

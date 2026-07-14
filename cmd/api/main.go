@@ -15,6 +15,7 @@ import (
 
 	"reservas-restaurante/internal/config"
 	"reservas-restaurante/internal/httpserver"
+	"reservas-restaurante/internal/notification"
 	"reservas-restaurante/internal/reservation"
 	"reservas-restaurante/internal/table"
 )
@@ -92,6 +93,24 @@ func run() error {
 
 	router := httpserver.New(cfg, tableHandler, reservationHandler)
 
+	// O dispatcher tem contexto PRÓPRIO, derivado com WithoutCancel do ctx do
+	// sinal. Ele precisa sobreviver ao Ctrl+C para ser derrubado só DEPOIS do
+	// servidor HTTP — ver a ordem de encerramento lá embaixo.
+	dispatcherCtx, pararDispatcher := context.WithCancel(context.WithoutCancel(ctx))
+	defer pararDispatcher()
+
+	dispatcher := notification.NewDispatcher(
+		notification.NewPostgresRepo(pool),
+		notification.LogSender{},
+		notification.DefaultConfig(),
+	)
+
+	dispatcherParou := make(chan struct{})
+	go func() {
+		defer close(dispatcherParou)
+		dispatcher.Run(dispatcherCtx)
+	}()
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: router,
@@ -121,13 +140,37 @@ func run() error {
 		slog.Info("sinal recebido, encerrando")
 	}
 
+	// ORDEM DE ENCERRAMENTO — importa, e o motivo é sutil.
+	//
+	// 1º o servidor HTTP: para de aceitar requisições novas e drena as em voo.
+	//    Uma reserva sendo criada neste instante ainda vai enfileirar sua
+	//    notificação, na transação dela.
+	// 2º o dispatcher: só então ele é derrubado, drenando o que já pegou.
+	//
+	// Se a ordem fosse invertida, as reservas criadas nos últimos segundos
+	// ficariam com a notificação enfileirada e ninguém neste processo para
+	// despachá-la. Repare que isso ATRASA a notificação, mas não a PERDE — a
+	// linha continua 'pending' no banco e o próximo boot a pega. É o outbox
+	// pagando de novo: até a ordem do shutdown virou questão de latência, e
+	// não de corretude.
+
 	// context.Background() e não ctx: o ctx JÁ foi cancelado pelo sinal — usá-lo
 	// aqui abortaria o shutdown no mesmo instante, que é o oposto de gracioso.
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+		return fmt.Errorf("shutdown do servidor: %w", err)
+	}
+
+	pararDispatcher()
+
+	select {
+	case <-dispatcherParou:
+	case <-time.After(15 * time.Second):
+		// Não é perda: as notificações reivindicadas e não concluídas continuam
+		// em 'sending', e o visibility timeout as devolve à fila no próximo boot.
+		slog.Error("dispatcher não encerrou a tempo — o que estava em voo volta pela fila")
 	}
 
 	slog.Info("encerrado")

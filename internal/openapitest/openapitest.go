@@ -89,4 +89,51 @@ func RequireInContract(t *testing.T, spec *openapi3.T, metodo, rota string, rec 
 		t.Errorf("%s %s (%d): corpo não bate com o schema declarado: %v\ncorpo: %s",
 			metodo, rota, rec.Code, err, rec.Body)
 	}
+
+	exigirCamposExatos(t, metodo, rota, rec.Code, media.Schema.Value, corpo)
+}
+
+// exigirCamposExatos é MAIS ESTRITO que o JSON Schema, de propósito.
+//
+// O JSON Schema é permissivo nas duas pontas: um campo não declarado em
+// `required` pode faltar, e uma propriedade extra é aceita por padrão. Resultado:
+// renomear `table_id` para `table_ids` passa batido — o campo velho "só não veio"
+// e o novo "é um extra". O contrato quebra e o teste fica verde.
+//
+// Como o swaggo não emite `required` nem `additionalProperties: false`, a única
+// forma de a validação morder é conferir os campos na mão. Nesta API toda
+// resposta tem todos os seus campos sempre — então exigimos igualdade exata entre
+// as chaves do corpo e as propriedades do schema, nas duas direções.
+func exigirCamposExatos(t *testing.T, metodo, rota string, status int, schema *openapi3.Schema, corpo any) {
+	t.Helper()
+
+	// Resposta em array: valida o schema dos itens contra o primeiro elemento.
+	if lista, ok := corpo.([]any); ok {
+		if len(lista) == 0 || schema.Items == nil || schema.Items.Value == nil {
+			return
+		}
+		exigirCamposExatos(t, metodo, rota, status, schema.Items.Value, lista[0])
+		return
+	}
+
+	objeto, ok := corpo.(map[string]any)
+	if !ok || len(schema.Properties) == 0 {
+		return
+	}
+
+	for campo := range objeto {
+		if _, declarado := schema.Properties[campo]; !declarado {
+			t.Errorf("%s %s (%d): a resposta traz o campo %q, que NÃO existe no swagger — "+
+				"rode `swag init`; a doc está descrevendo um contrato que o código não cumpre mais",
+				metodo, rota, status, campo)
+		}
+	}
+
+	for campo := range schema.Properties {
+		if _, presente := objeto[campo]; !presente {
+			t.Errorf("%s %s (%d): o swagger declara o campo %q, que a resposta NÃO traz — "+
+				"ou o handler parou de devolvê-lo, ou a anotação ficou para trás",
+				metodo, rota, status, campo)
+		}
+	}
 }

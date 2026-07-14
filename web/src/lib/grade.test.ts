@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { limitesDaRegua, livreEm, montarGrade } from './grade'
+import { limitesDaRegua, livreEm, maiorCapacidade, montarGrade, sugerirCombinacao } from './grade'
 import { instanteDe } from './tempo'
 import type { Reservation, TableAvailability } from '@/types/api'
 
@@ -106,6 +106,49 @@ describe('montarGrade — espalha a reserva pelas mesas que ela ocupa', () => {
       DIA,
     )
     expect(grade[0].blocos.map((b) => b.reserva.id)).toEqual(['cedo', 'tarde'])
+  })
+})
+
+describe('maiorCapacidade — o teto do modo automático', () => {
+  it('devolve a maior capacidade individual, não a soma', () => {
+    const salao = [mesa('a', 'M1', 2, []), mesa('b', 'M2', 8, []), mesa('c', 'M3', 4, [])]
+    expect(maiorCapacidade(salao)).toBe(8)
+  })
+
+  it('salão vazio é 0 — e o dialog usa isso para NÃO bloquear enquanto carrega', () => {
+    // maiorMesa === 0 desliga o bloqueio: sem dados ainda, não dá para declarar
+    // nada impossível. Se isto devolvesse -Infinity ou NaN, a comparação
+    // `pessoas > maiorMesa` mentiria.
+    expect(maiorCapacidade([])).toBe(0)
+  })
+})
+
+describe('sugerirCombinacao — o ponto de partida editável', () => {
+  const salao = [
+    mesa('p', 'Pequena', 2, []),
+    mesa('g', 'Grande', 8, []),
+    mesa('m', 'Media', 6, []),
+    mesa('q', 'Quatro', 4, []),
+  ]
+
+  it('pega as MAIORES primeiro, para juntar o mínimo de mesas', () => {
+    // 17 pessoas: 8 + 6 + 4 = 18 cobre com três mesas. Começar pelas pequenas
+    // exigiria mais mesas para o mesmo grupo.
+    const ids = sugerirCombinacao(salao, 17)
+    expect(ids).toEqual(['g', 'm', 'q'])
+  })
+
+  it('para assim que cobre o grupo', () => {
+    // 7 pessoas: a Grande (8) sozinha já basta. Não deve marcar mais nada.
+    expect(sugerirCombinacao(salao, 7)).toEqual(['g'])
+  })
+
+  it('grupo que excede o salão inteiro devolve TODAS as mesas', () => {
+    // 40 pessoas num salão de 20 lugares: marca tudo. Não é solução — é o máximo
+    // que dá para oferecer, e o servidor recusará com a soma insuficiente. A UI
+    // não finge que resolveu.
+    const ids = sugerirCombinacao(salao, 40)
+    expect(ids).toHaveLength(4)
   })
 })
 

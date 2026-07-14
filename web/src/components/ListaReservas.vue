@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { formatarTelefone } from '@/lib/telefone'
 import { horaLocal } from '@/lib/tempo'
 import type { Reservation, TableAvailability } from '@/types/api'
 
@@ -78,7 +79,7 @@ function nomesDasMesas(r: Reservation): string {
               class="dado text-ink-300 hover:text-ember-400 transition-colors"
               @click.stop
             >
-              {{ r.customer_phone }}
+              {{ formatarTelefone(r.customer_phone) }}
             </a>
           </td>
 

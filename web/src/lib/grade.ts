@@ -75,6 +75,49 @@ export function livreEm(mesa: TableAvailability, inicio: Timestamp, fim: Timesta
 }
 
 /**
+ * A maior capacidade individual do salão — o teto do modo automático.
+ *
+ * A heurística gulosa (seção 4) procura a menor mesa que comporte o grupo INTEIRO
+ * sozinha; ela não combina. Um grupo maior que este número é 409 garantido no
+ * automático, independentemente do horário. É o único caso que o frontend pode
+ * declarar impossível sem consultar o servidor: "todas as mesas grandes estão
+ * ocupadas" é questão de horário (só o backend sabe); "nenhuma mesa é grande o
+ * bastante" é física do salão (não muda com a hora).
+ */
+export function maiorCapacidade(disponibilidade: TableAvailability[]): number {
+  return disponibilidade.reduce((max, m) => Math.max(max, m.capacity), 0)
+}
+
+/**
+ * Um ponto de partida para a combinação: as maiores mesas até cobrir o grupo.
+ *
+ * NÃO é o sistema escolhendo a combinação — isso é a Fase 3b, deliberadamente não
+ * construída. É só uma sugestão editável: pega as mesas grandes primeiro para
+ * minimizar quantas o staff precisa juntar, e ele ajusta a partir daí. Combinar
+ * continua sendo decisão humana; a UI só evita começar do zero.
+ *
+ * Ignora se as mesas estão livres no horário — de propósito. O objetivo é cobrir a
+ * CAPACIDADE; o conflito de horário quem denuncia é o servidor, com a mensagem
+ * dele. Antecipar as duas coisas aqui seria reimplementar o allocator no cliente.
+ */
+export function sugerirCombinacao(
+  disponibilidade: TableAvailability[],
+  pessoas: number,
+): string[] {
+  const porMaior = [...disponibilidade].sort((a, b) => b.capacity - a.capacity)
+  const escolhidas: string[] = []
+  let soma = 0
+
+  for (const m of porMaior) {
+    if (soma >= pessoas) break
+    escolhidas.push(m.table_id)
+    soma += m.capacity
+  }
+
+  return escolhidas
+}
+
+/**
  * Os limites da régua do dia.
  *
  * Começa na abertura, mas NÃO termina necessariamente no fechamento: a validação 8

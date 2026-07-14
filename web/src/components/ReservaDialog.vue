@@ -2,8 +2,9 @@
 import { computed, nextTick, ref, watch } from 'vue'
 
 import { mensagemLegivel } from '@/api/errors'
-import { livreEm } from '@/lib/grade'
-import { instanteDe, minutosParaHHMM } from '@/lib/tempo'
+import { livreEm, maiorCapacidade, sugerirCombinacao } from '@/lib/grade'
+import { formatarTelefone, soDigitos } from '@/lib/telefone'
+import { hhmmParaMinutos, instanteDe, minutosParaHHMM } from '@/lib/tempo'
 import { useAgendaStore } from '@/stores/agenda'
 import type { DateOnly, TableAvailability, UUID } from '@/types/api'
 
@@ -25,13 +26,26 @@ const dialogo = ref<HTMLDialogElement>()
 const campoNome = ref<HTMLInputElement>()
 
 const nome = ref('')
+// Guarda só os dígitos. A máscara é aplicada na exibição (telefoneMascarado).
 const telefone = ref('')
 const pessoas = ref<number | null>(null)
 const inicio = ref('19:00')
-const fim = ref('21:00')
+// Vazio = "o sistema decide a saída" (início + 2h). NÃO é mais obrigatório.
+const fim = ref('')
 const selecionadas = ref<UUID[]>([])
 const erro = ref<string | null>(null)
 const salvando = ref(false)
+
+// A ponte entre o input mascarado e o dado limpo: o v-model do campo lê/escreve
+// aqui, mas `telefone` por baixo é sempre dígito puro.
+const telefoneMascarado = computed({
+  get: () => formatarTelefone(telefone.value),
+  set: (v: string) => {
+    telefone.value = soDigitos(v)
+  },
+})
+
+const DURACAO_PADRAO_MIN = 120 // 2h: default quando o staff não informa a saída.
 
 /**
  * Os TRÊS significados de `table_ids` (seção 14 da spec) numa interface só:
@@ -50,25 +64,38 @@ const modo = ref<'auto' | 'manual'>('auto')
 const instanteInicio = computed(() =>
   props.dia ? instanteDe(props.dia, inicio.value, props.tz) : '',
 )
-const instanteFim = computed(() =>
-  props.dia ? instanteDe(props.dia, fim.value, props.tz) : '',
-)
 
 /**
- * O fim antes do início significa que a reserva atravessa a meia-noite: 22:30 →
- * 00:30 é a última mesa do dia, permitida pela validação 8. Sem este ajuste, o
- * instanteDe montaria um `ends_at` ANTES do `starts_at`, e o backend devolveria
- * "o início deve ser anterior ao fim" para um pedido perfeitamente legítimo.
+ * A saída EFETIVA em minutos do dia. Uma fonte só para os dois casos:
+ *   - "Sai" preenchido  → o que o staff digitou
+ *   - "Sai" vazio       → início + 2h (default de #4)
+ *
+ * Pode passar de 1440 (23:00 + 2h = 25:00). Não normalizo com % aqui de propósito:
+ * o >= 1440 é o próprio sinal de "vira o dia", lido logo abaixo.
  */
-const viraODia = computed(() => fim.value <= inicio.value)
+const fimMinTotal = computed(() =>
+  fim.value
+    ? hhmmParaMinutos(fim.value) + (fim.value <= inicio.value ? 1440 : 0)
+    : hhmmParaMinutos(inicio.value) + DURACAO_PADRAO_MIN,
+)
+
+/** A saída como "HH:MM", já normalizada — é o que a UI mostra e o que vira instante. */
+const fimHHMM = computed(() => minutosParaHHMM(fimMinTotal.value % 1440))
+
+/**
+ * A reserva atravessa a meia-noite? (22:30 → 00:30 é a última mesa do dia,
+ * permitida pela validação 8.) Vale tanto para "Sai" digitado antes do início
+ * quanto para o default de +2h que estoura as 24h.
+ */
+const viraODia = computed(() => fimMinTotal.value >= 1440)
 
 const instanteFimReal = computed(() => {
   if (!props.dia) return ''
-  if (!viraODia.value) return instanteFim.value
+  if (!viraODia.value) return instanteDe(props.dia, fimHHMM.value, props.tz)
 
   const amanha = new Date(`${props.dia}T12:00:00Z`)
   amanha.setUTCDate(amanha.getUTCDate() + 1)
-  return instanteDe(amanha.toISOString().slice(0, 10) as DateOnly, fim.value, props.tz)
+  return instanteDe(amanha.toISOString().slice(0, 10) as DateOnly, fimHHMM.value, props.tz)
 })
 
 /** A grade já traz as janelas livres calculadas pelo Go: aqui é só contenção. */
@@ -84,6 +111,17 @@ const lugaresSelecionados = computed(() =>
 )
 
 const combinando = computed(() => selecionadas.value.length > 1)
+
+/** O teto do modo automático. A lógica e o porquê vivem em lib/grade.ts. */
+const maiorMesa = computed(() => maiorCapacidade(props.disponibilidade))
+
+/** Grupo maior que qualquer mesa sozinha: impossível no automático, sempre. */
+const grandeDemaisParaAuto = computed(
+  () => pessoas.value !== null && maiorMesa.value > 0 && pessoas.value > maiorMesa.value,
+)
+
+/** No automático, um grupo maior que qualquer mesa é 409 garantido. Bloqueia. */
+const bloqueiaAuto = computed(() => modo.value === 'auto' && grandeDemaisParaAuto.value)
 
 /**
  * A soma das capacidades cobre o grupo?
@@ -104,6 +142,12 @@ function alternar(id: UUID) {
   else selecionadas.value.splice(i, 1)
 }
 
+/** Empurra para o manual com as maiores mesas já marcadas. Lógica em lib/grade.ts. */
+function irParaManualComSugestao() {
+  modo.value = 'manual'
+  selecionadas.value = sugerirCombinacao(props.disponibilidade, pessoas.value ?? 0)
+}
+
 watch(
   () => props.aberto,
   async (aberto) => {
@@ -115,6 +159,9 @@ watch(
     nome.value = ''
     telefone.value = ''
     pessoas.value = null
+    inicio.value = '19:00'
+    // Volta a vazio: cada abertura recomeça com a saída no default (#4).
+    fim.value = ''
     erro.value = null
 
     // Veio de um clique na grade: a mesa e a hora já vêm preenchidas, e o modo já
@@ -127,9 +174,10 @@ watch(
       selecionadas.value = []
     }
 
+    // A hora do clique preenche só o INÍCIO. A saída fica no default de +2h — o
+    // clique diz "reservar aqui", não "reservar por exatamente duas horas".
     if (props.minutosPre !== null) {
       inicio.value = minutosParaHHMM(props.minutosPre % 1440)
-      fim.value = minutosParaHHMM((props.minutosPre + 120) % 1440)
     }
 
     dialogo.value?.showModal()
@@ -150,10 +198,17 @@ async function salvar() {
     erro.value = 'Quantas pessoas?'
     return
   }
-  // A ÚNICA regra local: modo manual sem mesa marcada é contradição, não pedido.
-  // Enviar isso cairia no automático em silêncio.
+  // Modo manual sem mesa marcada é contradição, não pedido: enviar isso cairia no
+  // automático em silêncio.
   if (modo.value === 'manual' && selecionadas.value.length === 0) {
     erro.value = 'Marque ao menos uma mesa, ou volte para o modo automático.'
+    return
+  }
+  // Grupo maior que qualquer mesa, no automático, é 409 garantido — e a mensagem
+  // do servidor ("nenhuma mesa disponível para o horário") mentiria, porque o
+  // horário não é o problema. Barramos antes, com a verdade e uma saída.
+  if (bloqueiaAuto.value) {
+    erro.value = `Nenhuma mesa comporta ${pessoas.value} pessoas sozinha (a maior tem ${maiorMesa.value}). Use "Eu escolho" para combinar mesas.`
     return
   }
 
@@ -216,10 +271,11 @@ async function salvar() {
             <label for="fone" class="rotulo mb-2 block">Telefone</label>
             <input
               id="fone"
-              v-model="telefone"
+              v-model="telefoneMascarado"
               type="tel"
+              inputmode="numeric"
               autocomplete="off"
-              placeholder="11999998888"
+              placeholder="(83) 9 9999-9999"
               class="dado bg-ink-950 border-ink-700 placeholder:text-ink-600 focus:border-ember-500 w-full border px-3 py-2.5 text-sm outline-none"
             />
           </div>
@@ -248,7 +304,9 @@ async function salvar() {
             />
           </div>
           <div>
-            <label for="ate" class="rotulo mb-2 block">Sai</label>
+            <label for="ate" class="rotulo mb-2 block">
+              Sai <span class="text-ink-600 normal-case">· opcional</span>
+            </label>
             <input
               id="ate"
               v-model="fim"
@@ -256,7 +314,13 @@ async function salvar() {
               step="1800"
               class="dado bg-ink-950 border-ink-700 focus:border-ember-500 w-full border px-3 py-2.5 text-lg font-medium outline-none"
             />
-            <p v-if="viraODia" class="text-ember-300 mt-1.5 text-[0.6875rem]">
+            <!-- Vazio: mostra o default que será enviado, para o staff não achar que
+                 esqueceu um campo obrigatório. Preenchido e virando o dia: o aviso
+                 da última mesa da noite. -->
+            <p v-if="!fim" class="text-ink-500 mt-1.5 text-[0.6875rem]">
+              Sem preencher: sai {{ fimHHMM }} (2h).
+            </p>
+            <p v-else-if="viraODia" class="text-ember-300 mt-1.5 text-[0.6875rem]">
               Vira o dia — última mesa da noite.
             </p>
           </div>
@@ -292,7 +356,29 @@ async function salvar() {
             </button>
           </div>
 
-          <p v-if="modo === 'auto'" class="text-ink-500 mt-2 text-xs">
+          <!-- Aviso PROATIVO: um grupo maior que qualquer mesa nunca cabe no
+               automático, e o staff não deve descobrir isso só depois de apertar
+               Reservar e levar um 409. O aviso aparece assim que a contagem
+               ultrapassa a maior mesa, com um atalho que já marca as maiores
+               mesas no manual. -->
+          <div
+            v-if="modo === 'auto' && grandeDemaisParaAuto"
+            class="border-ember-500/50 bg-ember-500/10 mt-2 border-l-2 px-3 py-2.5"
+          >
+            <p class="text-ember-300 text-sm">
+              Grupo de <strong>{{ pessoas }}</strong> não cabe em nenhuma mesa sozinha —
+              a maior tem {{ maiorMesa }} lugares.
+            </p>
+            <button
+              type="button"
+              class="font-display text-ember-400 hover:text-ember-300 mt-1.5 text-xs font-bold tracking-wide uppercase transition-colors"
+              @click="irParaManualComSugestao"
+            >
+              Combinar mesas →
+            </button>
+          </div>
+
+          <p v-else-if="modo === 'auto'" class="text-ink-500 mt-2 text-xs">
             O sistema pega a menor mesa livre que comporte o grupo. Se nenhuma
             comportar sozinha, ele recusa —
             <strong class="text-ink-400">combinar é decisão sua</strong>.
@@ -379,7 +465,7 @@ async function salvar() {
         </button>
         <button
           type="submit"
-          :disabled="salvando"
+          :disabled="salvando || bloqueiaAuto"
           class="font-display bg-ember-500 text-ink-950 hover:bg-ember-400 px-5 py-2 text-sm font-bold tracking-wide uppercase transition-colors disabled:cursor-not-allowed disabled:opacity-50"
         >
           {{ salvando ? 'Reservando…' : 'Reservar' }}

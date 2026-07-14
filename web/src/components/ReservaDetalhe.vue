@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 
 import { mensagemLegivel } from '@/api/errors'
+import { formatarTelefone } from '@/lib/telefone'
 import { horaLocal } from '@/lib/tempo'
 import { useAgendaStore } from '@/stores/agenda'
 import type { Reservation, TableAvailability } from '@/types/api'
@@ -67,7 +68,12 @@ async function cancelar() {
 
       <div class="px-6 py-5">
         <p class="font-display text-xl font-bold">{{ reserva.customer_name }}</p>
-        <p class="dado text-ink-400 mt-0.5 text-sm">{{ reserva.customer_phone }}</p>
+        <a
+          :href="`tel:${reserva.customer_phone}`"
+          class="dado text-ink-400 hover:text-ember-400 mt-0.5 block text-sm transition-colors"
+        >
+          {{ formatarTelefone(reserva.customer_phone) }}
+        </a>
 
         <dl class="border-ink-800 mt-5 space-y-3 border-t pt-5">
           <div class="flex justify-between">

@@ -64,7 +64,7 @@ API backend para gerenciamento de reservas de mesas em um restaurante único (se
 | **1a** | CRUD de mesas e reservas, mesa atribuída manualmente, constraint de overlap no Postgres | `net/http` puro, `database/sql`/`pgx`, modelagem de intervalo de tempo com `tstzrange`/`EXCLUDE` |
 | **1b** | Alocação automática de mesa (heurística gulosa via SQL), com override manual opcional | Separação de domínio e HTTP via interfaces definidas pelo consumidor; testes de unidade de validação e roteamento de erro sem banco |
 | **1c** | Concorrência: múltiplas requisições simultâneas competindo pela mesma mesa/horário | Estratégia otimista + retry, `go test -race`, teste de integração concorrente |
-| **2** | Worker pool para notificação assíncrona pós-reserva | goroutines, channels, `context` para timeout |
+| **2** | **Outbox transacional** + worker pool para notificação assíncrona | goroutines, channels, `context` (timeout **e cancelamento**), transação multi-statement, fila em Postgres com `FOR UPDATE SKIP LOCKED` |
 | **3 (futuro, não planejado em detalhe)** | Combinação de mesas | Redesenho de modelo — só após 1a/1b/1c estarem sólidas |
 
 ### Estado da implementação
@@ -73,7 +73,9 @@ API backend para gerenciamento de reservas de mesas em um restaurante único (se
 
 Além do escopo previsto, entraram três coisas que a spec original não tinha e que se mostraram necessárias: **RLS** (seção 7), **testes de contrato contra o `swagger.json`** (seção 7) e o pacote **`httpx`** (seção 6). As três estão documentadas nas suas seções e no changelog da quarta rodada (seção 12).
 
-**Fase 2 não foi iniciada.**
+**A Fase 2 está concluída** (seção 13). Ela mudou de escopo em relação ao plano original: um worker pool alimentado por um channel em memória **perde notificação** em qualquer crash ou restart, e a razão de existir de uma notificação é chegar. Foi construída como **outbox transacional** — o que preserva integralmente o objetivo de aprendizado (goroutines, channels, `context`) e ainda adiciona um caso real de transação multi-statement, que o projeto até então não tinha.
+
+**Falta apenas a Fase 3** (combinação de mesas), marcada desde o início como futura e não planejada em detalhe.
 
 ---
 
@@ -449,6 +451,12 @@ reservas-restaurante/
 │   │   ├── integration_test.go   # concorrência contra Postgres real (1c); pulado sem TEST_DATABASE_URL
 │   │   ├── handler.go            # handlers HTTP (/reservations e /tables/{id}/availability)
 │   │   └── contract_test.go      # valida as respostas contra o swagger.json
+│   ├── notification/             # Fase 2 — ver seção 13
+│   │   ├── outbox.go             # Enqueue(ctx, tx, ...) — grava o evento na transação de quem chama
+│   │   ├── repository.go         # a fila: Claim (FOR UPDATE SKIP LOCKED), MarkSent, MarkFailed
+│   │   ├── sender.go             # interface Sender + LogSender
+│   │   ├── worker.go             # Dispatcher: poller + pool + shutdown gracioso
+│   │   └── worker_test.go        # drenagem no shutdown; prova o context.WithoutCancel
 │   ├── httpx/                    # PACOTE FOLHA — só stdlib. Ver "ciclo de import" abaixo
 │   │   └── response.go           # httpx.JSON, httpx.Error, ErrorResponse
 │   ├── openapitest/              # validador de contrato compartilhado (seção 7)
@@ -461,7 +469,9 @@ reservas-restaurante/
 ├── migrations/
 │   ├── 0001_create_tables.{up,down}.sql
 │   ├── 0002_create_reservations.{up,down}.sql
-│   └── 0003_secure_schema_migrations.{up,down}.sql   # RLS — ver seção 7
+│   ├── 0003_secure_schema_migrations.{up,down}.sql   # RLS — ver seção 7
+│   ├── 0004_create_notifications.{up,down}.sql      # outbox — ver seção 13
+│   └── 0005_notifications_claim.{up,down}.sql       # 'sending' + visibility timeout
 ├── docs/                          # gerado por swaggo — VAI VERSIONADO (ver seção 7)
 ├── go.mod
 ├── go.sum
@@ -586,6 +596,10 @@ Para não serem confundidas com esquecimento durante a implementação:
 6. **Retry sem backoff** — três tentativas imediatas, sem espera nem jitter. Para o volume de um restaurante é irrelevante; num teste de estresse com dezenas de goroutines, elas martelam o banco em rajada.
 7. **`PATCH /tables/{id}` é last-write-wins** — dois `PATCH` concorrentes na mesma mesa se sobrescrevem em silêncio. Não há `@Version`/optimistic locking. A concorrência que este projeto trata é a de *reservas* (via `EXCLUDE`), não a de edição de mesas.
 8. **Nenhuma validação de duração máxima de reserva** — nada impede uma reserva de 12 horas.
+9. **Entrega `at-least-once`, não `exactly-once`** (Fase 2). Se o `Send` funciona e o `MarkSent` falha, a notificação é enviada de novo quando o visibility timeout devolver a linha. **Isto não tem conserto:** `exactly-once` exigiria commit atômico entre o Postgres e o provedor de SMS — um 2PC entre sistemas que não se conhecem. Todo sistema de fila honesto entrega `at-least-once` e empurra a idempotência para o consumidor final.
+10. **Fila por polling, não por `LISTEN/NOTIFY`** — a notificação sai com até `PollInterval` (2s) de atraso, e o banco é consultado mesmo quando não há nada a fazer. O `LISTEN/NOTIFY` do Postgres eliminaria a espera, ao custo de uma conexão dedicada e de um caminho de reconexão a manter.
+11. **Nada observa o estado `failed`** — uma notificação que esgota as tentativas vira `failed` com o erro gravado, e **ninguém é avisado**. Falta um alerta ou um painel; hoje só se descobre olhando a tabela.
+12. **`LogSender` é o único `Sender`** — notificação de verdade (e-mail/SMS) está fora de escopo desde a seção 1. Trocá-lo por um cliente de Twilio é implementar **uma** função.
 
 > **Fechado:** o débito "`reservation/handler_test.go` não existe" foi resolvido. O arquivo cobre o parsing dos filtros (formato do `?date=`, enum do `?status=`, UUID do `?table_id=`), o `DisallowUnknownFields`, a conversão DTO→domínio (`table_id` ausente/null/informado), e — o mais importante — **o invariante do `ErrSlotTaken`**: se ele vazar do allocator, o handler devolve `500` com log de `INVARIANTE VIOLADO`, nunca um `409` disfarçado. Verificado que o teste falha ao mapear `ErrSlotTaken` para `409`, denunciando tanto o status errado quanto o vazamento da mensagem interna no corpo.
 
@@ -648,3 +662,67 @@ A ironia é registrada de propósito: este projeto construiu um **teste de contr
 - **Teste de contrato contra o `swagger.json`** (seção 7) — sem ele, a doc *code-first* pode mentir indefinidamente.
 - **`GET /tables/{id}/availability` implementado em `reservation/`**, não em `table/` (seção 4) — a URL não é a fronteira do domínio.
 - **Quatro débitos técnicos novos** (seção 8, itens 6 a 9), incluindo a lacuna do `reservation/handler_test.go`.
+
+---
+
+## 13. Fase 2 — Outbox transacional e worker pool
+
+### Por que a spec original estava errada
+
+A spec pedia *"worker pool para notificação assíncrona pós-reserva"*, com o trabalho chegando por um channel alimentado pelo handler. **Isso perde notificação.** A reserva é confirmada, o e-mail é enfileirado em memória, o processo cai — deploy, OOM, `Ctrl+C` — e a notificação evapora. O cliente tem a reserva no banco e nunca soube. Não é um detalhe de robustez: **a razão de existir de uma notificação é chegar.**
+
+A correção é o **transactional outbox**: a intenção de notificar é gravada como uma linha, **na mesma transação** que muda o estado da reserva. Ou existem as duas, ou nenhuma. Um worker consome a tabela. Se o processo morre, a linha continua lá.
+
+**E não se perde nada do aprendizado:** o worker pool continua existindo — goroutines, channels, `context`, shutdown gracioso. Só muda **de onde o trabalho vem**.
+
+### Modelo
+
+`notifications` (migrations `0004` e `0005`):
+
+| Coluna | Papel |
+|---|---|
+| `reservation_id`, `kind` | o evento (`reservation_confirmed` \| `reservation_cancelled`) |
+| `payload jsonb` | **snapshot** do que enviar, congelado no instante do evento |
+| `status` | `pending` → `sending` → `sent` \| `failed` |
+| `attempts`, `last_error` | máquina de retry, no banco |
+| `claimed_at` | **visibility timeout** |
+
+**`payload` e não um `JOIN` com `reservations`.** Se o worker fizesse `JOIN` na hora de enviar, uma notificação de *"confirmada"* despachada com atraso poderia sair descrevendo uma reserva **que já foi cancelada**. O outbox carrega **o fato como ele foi**, não como ele está — é um log de eventos, não uma view do estado.
+
+**Toda fila persistente tem três estados, não dois.** A `0004` modelou só a escrita e esqueceu o consumo; a `0005` corrigiu. O worker precisa **reivindicar** a linha antes de enviar (segurar uma transação de banco aberta durante uma chamada HTTP externa é inaceitável num pool), e se ele morrer entre reivindicar e enviar, o `claimed_at` faz a fila **devolver** a linha. Quem modela só `pending → sent` está assumindo que o consumidor nunca morre no meio.
+
+### A fila: `FOR UPDATE SKIP LOCKED`
+
+**A spec descartou o `SELECT FOR UPDATE` para reservas (seção 5), e estava certa. Aqui ele é a ferramenta correta — e a diferença não é a primitiva, é o que se está travando.**
+
+- Em reservas, *"a Mesa 5 entre 19h e 21h"* **não é uma linha**: é uma **condição sobre linhas que ainda não existem**. Não há o que travar, e o lock pessimista travaria a mesa inteira, gerando contenção entre horários que nem se sobrepõem.
+- Aqui, *"a notificação 42"* **é uma linha** — discreta, existente. É exatamente o que um lock de linha protege.
+
+O **`SKIP LOCKED`** faz o segundo worker **pular** o que o primeiro já reivindicou, em vez de esperar por ele. É o que transforma N workers em paralelismo real em vez de uma fila serializada com passos extras.
+
+`attempts` é incrementado **na reivindicação, não na falha**. Se só subisse ao falhar, uma mensagem venenosa — que *mata* o worker em vez de retornar erro — seria reivindicada, mataria o processo, voltaria pelo timeout, mataria o próximo, para sempre.
+
+### O pool: `close(channel)` e `context.WithoutCancel`
+
+**`close(fila)` é o encerramento inteiro.** Os workers estão em `for n := range fila`, e um channel fechado **que ainda tem itens continua entregando** — o `range` só termina quando ele esvazia. Fechar o channel diz, de uma vez: *"não vem trabalho novo, mas termine o que já está aí"*. Sem channel de `done`, sem contador, sem sinalizar worker por worker.
+
+**`context.WithoutCancel` é a linha que separa um pool que funciona de um que corrompe dados.** No shutdown, o `ctx` do dispatcher **já está cancelado** — mas os workers ainda estão drenando. Se usassem esse `ctx` para falar com o banco, **o `MarkSent` falharia sempre**, e toda notificação enviada durante o encerramento seria reenviada no próximo boot (o visibility timeout a devolveria à fila). **Cancelamento serve para parar de começar coisas novas, não para impedir de terminar as que já começaram.**
+
+O `worker_test.go` prova isso: trocar `WithoutCancel` por `ctx` deixa a asserção de `ctx.Err()` vermelha. *Comentário não fica vermelho quando alguém o contraria.*
+
+**Backpressure sai de graça do buffer.** O channel tem o tamanho de um lote: o poller não consegue reivindicar um segundo lote enquanto o primeiro não for consumido — ele fica parado no `fila <- n`. A memória nunca cresce sem limite, o banco não é consultado mais rápido do que os workers enviam, e **nada é descartado**. As alternativas ruins seriam descartar quando cheio (perde notificação) ou buffer infinito (OOM).
+
+### O bug que o outbox revelou no `DELETE /reservations/{id}`
+
+O cancelamento sempre foi idempotente — `204` nas duas vezes — e nunca foi problema. **No instante em que passou a produzir um evento, "não fazer nada" e "fazer de novo" deixaram de ser equivalentes**: o cliente receberia dois SMS de cancelamento, atrás de dois status codes perfeitamente corretos.
+
+Corrigido com `WHERE id = $1 AND status = 'confirmed'`, que **não é um `if` — é um compare-and-swap atômico.** Sob dois cancelamentos concorrentes, o Postgres serializa pelo lock da linha; o segundo `UPDATE` reavalia o `WHERE` depois do commit do primeiro, vê que o status já mudou, e afeta zero linhas. Sem lock explícito, sem `@Version`, sem retry.
+
+> **Idempotência do endpoint não é idempotência do efeito colateral.**
+
+### Ordem de encerramento
+
+1. **`srv.Shutdown`** — o servidor HTTP para de aceitar requisições e drena as em voo. Uma reserva sendo criada agora ainda enfileira sua notificação, na transação dela.
+2. **`pararDispatcher()`** — só então o pool é derrubado, drenando o que já pegou.
+
+Invertida, a ordem **atrasaria** notificações, mas **não as perderia** — a linha fica `pending` e o próximo boot a pega. É o outbox pagando de novo: uma decisão que num pool em memória seria de **corretude** virou uma decisão de **latência**.

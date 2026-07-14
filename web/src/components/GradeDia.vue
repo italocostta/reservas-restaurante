@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import type { Bloco, LinhaGrade } from '@/lib/grade'
+import { APARENCIA_STATUS, statusMesa } from '@/lib/statusMesa'
 import { horaLocal, minutosParaHHMM } from '@/lib/tempo'
 import type { Reservation, TableAvailability } from '@/types/api'
 
@@ -19,6 +20,17 @@ const emit = defineEmits<{
 }>()
 
 const duracao = computed(() => props.regua.fim - props.regua.inicio)
+
+/**
+ * O status da mesa na grade. Todas as mesas aqui são ativas (o /availability só
+ * devolve ativas), então a `true`. Usa os instantes reais das reservas contra o
+ * agora real: no dia de hoje distingue ocupada; num dia futuro, tudo vira
+ * reservada/disponível sozinho — a mesma função do Salão, sem caso especial.
+ */
+function statusDaLinha(linha: LinhaGrade) {
+  const reservas = linha.blocos.map((b) => b.reserva)
+  return APARENCIA_STATUS[statusMesa(reservas, linha.mesa.table_id, true, Date.now())]
+}
 
 /** Minutos do dia → posição percentual na régua. É toda a matemática do desenho. */
 function pct(minutos: number): number {
@@ -113,14 +125,27 @@ function rotuloDoBloco(b: Bloco): string {
       :key="linha.mesa.table_id"
       class="border-ink-800 hover:bg-ink-900/40 group flex border-b last:border-b-0 transition-colors"
     >
-      <!-- Etiqueta da mesa. Capacidade em mono, grande: é o número que o staff
-           compara com o tamanho do grupo ao telefone. -->
+      <!-- Etiqueta da mesa: nome + status em cima, capacidade em mono à direita.
+           O status é um ponto colorido + palavra — o ponto é o que se lê de
+           relance, a palavra confirma. -->
       <div
-        class="border-ink-800 flex w-40 shrink-0 items-center justify-between gap-2 border-r px-3 py-2.5"
+        class="border-ink-800 flex w-40 shrink-0 items-center justify-between gap-2 border-r px-3 py-2"
       >
-        <span class="font-display text-ink-100 truncate text-sm font-semibold">
-          {{ linha.mesa.table_name }}
-        </span>
+        <div class="min-w-0">
+          <span class="font-display text-ink-100 block truncate text-sm font-semibold">
+            {{ linha.mesa.table_name }}
+          </span>
+          <span class="mt-0.5 flex items-center gap-1.5">
+            <span
+              class="inline-block h-1.5 w-1.5 rounded-full"
+              :class="statusDaLinha(linha).ponto"
+              aria-hidden="true"
+            ></span>
+            <span class="rotulo" :class="statusDaLinha(linha).texto">
+              {{ statusDaLinha(linha).rotulo }}
+            </span>
+          </span>
+        </div>
         <span class="dado text-ink-300 shrink-0 text-base font-medium">
           {{ linha.mesa.capacity }}
         </span>

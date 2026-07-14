@@ -1,13 +1,48 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
+import { api } from '@/api/client'
 import { mensagemLegivel } from '@/api/errors'
 import MesaDialog from '@/components/MesaDialog.vue'
 import MesaLinha from '@/components/MesaLinha.vue'
+import { hojeNoRestaurante } from '@/lib/tempo'
+import { statusMesa, type StatusMesa } from '@/lib/statusMesa'
+import { useExpedienteStore } from '@/stores/expediente'
 import { useTablesStore, type FiltroMesas } from '@/stores/tables'
-import type { Table } from '@/types/api'
+import type { Reservation, Table } from '@/types/api'
 
 const store = useTablesStore()
+const expediente = useExpedienteStore()
+
+// As reservas de HOJE, para o status operacional de cada mesa. O Salão é sempre
+// sobre hoje — "ocupada agora" não faz sentido para outro dia.
+const reservasHoje = ref<Reservation[]>([])
+
+/**
+ * O status de uma mesa é recalculado a cada render (Date.now() muda), e isso é de
+ * propósito: uma reserva que começa às 20h faz a mesa virar "ocupada" às 20h sem
+ * ninguém recarregar. Sem estado congelado, sem timer — o Vue reavalia quando algo
+ * o invalida, e o pior caso é o status atrasar até a próxima interação. Aceitável:
+ * o status é uma dica de relance, não um relógio.
+ */
+function status(mesa: Table): StatusMesa {
+  return statusMesa(reservasHoje.value, mesa.id, mesa.is_active, Date.now())
+}
+
+async function carregarStatus() {
+  await expediente.carregar()
+  if (!expediente.pronto) return
+  try {
+    reservasHoje.value = await api.reservations.list({
+      date: hojeNoRestaurante(expediente.tz),
+      status: 'confirmed',
+    })
+  } catch {
+    // Status é enfeite informativo: se falhar, a lista de mesas continua útil.
+    // Não sobrescrevo o erroDeCarga do store por causa de uma dica de status.
+    reservasHoje.value = []
+  }
+}
 
 const dialogoAberto = ref(false)
 const emEdicao = ref<Table | null>(null)
@@ -24,7 +59,10 @@ const filtros: { valor: FiltroMesas; rotulo: string }[] = [
   { valor: 'inativas', rotulo: 'Fora' },
 ]
 
-onMounted(store.carregar)
+onMounted(() => {
+  store.carregar()
+  carregarStatus()
+})
 
 function abrirNova() {
   emEdicao.value = null
@@ -166,6 +204,7 @@ function pulsar(id: string) {
         v-for="mesa in store.visiveis"
         :key="mesa.id"
         :mesa="mesa"
+        :status="status(mesa)"
         :class="{ pulso: recemMudada === mesa.id }"
         @editar="abrirEdicao(mesa)"
         @alternar="alternar(mesa)"

@@ -27,13 +27,18 @@ type repository interface {
 	Cancel(ctx context.Context, id uuid.UUID) error
 }
 
+type schedule interface {
+	FreeWindows(ctx context.Context, tableID uuid.UUID, dia string) ([]Window, error)
+}
+
 type Handler struct {
 	allocator allocator
 	repo      repository
+	schedule  schedule
 }
 
-func NewHandler(a allocator, repo repository) *Handler {
-	return &Handler{allocator: a, repo: repo}
+func NewHandler(a allocator, repo repository, s schedule) *Handler {
+	return &Handler{allocator: a, repo: repo, schedule: s}
 }
 
 type createRequest struct {
@@ -234,4 +239,39 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	// 204: cancelado, sem corpo. Devolver a reserva cancelada seria uma opção,
 	// mas o cliente já sabe o que pediu e o único campo que mudou é o status.
 	httpx.JSON(w, http.StatusNoContent, nil)
+}
+
+// Availability godoc
+//
+//	@Summary		Janelas livres de uma mesa no dia
+//	@Description	Devolve os intervalos livres da mesa dentro do horário de funcionamento do restaurante, no fuso dele. Mesa inativa devolve lista vazia.
+//	@Tags			mesas
+//	@Produce		json
+//	@Param			id		path		string	true	"ID da mesa (UUID)"
+//	@Param			date	query		string	true	"Dia, AAAA-MM-DD, no fuso do restaurante"	example(2026-07-20)
+//	@Success		200		{array}		Window
+//	@Failure		400		{object}	httpx.ErrorResponse	"ID inválido, date ausente/malformado, ou mesa inexistente"
+//	@Router			/tables/{id}/availability [get]
+func (h *Handler) Availability(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "ID de mesa inválido.")
+		return
+	}
+
+	// Obrigatório, ao contrário dos filtros do List: "janelas livres" sem dia é
+	// uma pergunta sem resposta, não uma pergunta sem filtro.
+	dia := r.URL.Query().Get("date")
+	if dia == "" {
+		httpx.Error(w, http.StatusBadRequest, "Parâmetro 'date' é obrigatório (AAAA-MM-DD).")
+		return
+	}
+
+	janelas, err := h.schedule.FreeWindows(r.Context(), id, dia)
+	if err != nil {
+		responder(w, r, err, "consultando disponibilidade")
+		return
+	}
+
+	httpx.JSON(w, http.StatusOK, janelas)
 }

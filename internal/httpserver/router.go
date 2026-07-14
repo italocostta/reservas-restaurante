@@ -29,6 +29,12 @@ func New(cfg config.Config, tables *table.Handler, reservations *reservation.Han
 	mux.HandleFunc("GET /tables/{id}", tables.Get)
 	mux.HandleFunc("PATCH /tables/{id}", tables.Update)
 
+	// Rota de mesa, handler de reserva. A URL não é a fronteira do domínio:
+	// "quais janelas desta mesa estão livres?" só se responde olhando as
+	// reservas. O ServeMux resolve a especificidade sozinho — /tables/{id}/
+	// availability não conflita com /tables/{id}.
+	mux.HandleFunc("GET /tables/{id}/availability", reservations.Availability)
+
 	mux.HandleFunc("POST /reservations", reservations.Create)
 	mux.HandleFunc("GET /reservations", reservations.List)
 	mux.HandleFunc("GET /reservations/{id}", reservations.Get)

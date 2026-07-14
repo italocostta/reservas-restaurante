@@ -40,6 +40,13 @@ definitions:
     x-enum-varnames:
     - StatusConfirmed
     - StatusCancelled
+  reservation.Window:
+    properties:
+      ends_at:
+        type: string
+      starts_at:
+        type: string
+    type: object
   reservation.createRequest:
     properties:
       customer_name:
@@ -344,6 +351,38 @@ paths:
           schema:
             $ref: '#/definitions/httpx.ErrorResponse'
       summary: Atualiza uma mesa
+      tags:
+      - mesas
+  /tables/{id}/availability:
+    get:
+      description: Devolve os intervalos livres da mesa dentro do horário de funcionamento
+        do restaurante, no fuso dele. Mesa inativa devolve lista vazia.
+      parameters:
+      - description: ID da mesa (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Dia, AAAA-MM-DD, no fuso do restaurante
+        example: "2026-07-20"
+        in: query
+        name: date
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/reservation.Window'
+            type: array
+        "400":
+          description: ID inválido, date ausente/malformado, ou mesa inexistente
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+      summary: Janelas livres de uma mesa no dia
       tags:
       - mesas
 swagger: "2.0"

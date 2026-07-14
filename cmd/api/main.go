@@ -72,19 +72,23 @@ func run() error {
 	// ReservationCreator. É a mesma struct, fatiada por duas interfaces pequenas
 	// que o allocator declarou. Ele não sabe que é o mesmo objeto, e não precisa.
 	reservationRepo := reservation.NewPostgresRepo(pool, cfg.ServiceTZ)
+
+	// Aqui é onde a Config (infra) vira ServiceHours (domínio). O pacote
+	// reservation não importa config: quem traduz é o main.go.
+	hours := reservation.ServiceHours{
+		Start: cfg.ServiceStart,
+		End:   cfg.ServiceEnd,
+		TZ:    cfg.ServiceTZ,
+	}
+
 	allocator := reservation.NewAllocator(
 		reservationRepo,
 		reservationRepo,
-		// Aqui é onde a Config (infra) vira ServiceHours (domínio). O pacote
-		// reservation não importa config: quem traduz é o main.go.
-		reservation.ServiceHours{
-			Start: cfg.ServiceStart,
-			End:   cfg.ServiceEnd,
-			TZ:    cfg.ServiceTZ,
-		},
+		hours,
 		reservation.SystemClock{},
 	)
-	reservationHandler := reservation.NewHandler(allocator, reservationRepo)
+	schedule := reservation.NewSchedule(reservationRepo, hours)
+	reservationHandler := reservation.NewHandler(allocator, reservationRepo, schedule)
 
 	router := httpserver.New(cfg, tableHandler, reservationHandler)
 

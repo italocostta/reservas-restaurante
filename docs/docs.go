@@ -366,6 +366,52 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/tables/{id}/availability": {
+            "get": {
+                "description": "Devolve os intervalos livres da mesa dentro do horário de funcionamento do restaurante, no fuso dele. Mesa inativa devolve lista vazia.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mesas"
+                ],
+                "summary": "Janelas livres de uma mesa no dia",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "ID da mesa (UUID)",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "example": "2026-07-20",
+                        "description": "Dia, AAAA-MM-DD, no fuso do restaurante",
+                        "name": "date",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/reservation.Window"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "ID inválido, date ausente/malformado, ou mesa inexistente",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -428,6 +474,17 @@ const docTemplate = `{
                 "StatusConfirmed",
                 "StatusCancelled"
             ]
+        },
+        "reservation.Window": {
+            "type": "object",
+            "properties": {
+                "ends_at": {
+                    "type": "string"
+                },
+                "starts_at": {
+                    "type": "string"
+                }
+            }
         },
         "reservation.createRequest": {
             "type": "object",

@@ -11,13 +11,14 @@ import (
 
 	"reservas-restaurante/internal/config"
 	"reservas-restaurante/internal/httpx"
+	"reservas-restaurante/internal/reservation"
 	"reservas-restaurante/internal/table"
 )
 
 const maxBodyBytes = 1 << 20 // 1 MiB
 
 // New monta as rotas e devolve o handler raiz já embrulhado nas middlewares.
-func New(cfg config.Config, tables *table.Handler) http.Handler {
+func New(cfg config.Config, tables *table.Handler, reservations *reservation.Handler) http.Handler {
 	mux := http.NewServeMux()
 
 	// Método e caminho na mesma string — recurso do ServeMux desde o Go 1.22.
@@ -27,6 +28,11 @@ func New(cfg config.Config, tables *table.Handler) http.Handler {
 	mux.HandleFunc("GET /tables", tables.List)
 	mux.HandleFunc("GET /tables/{id}", tables.Get)
 	mux.HandleFunc("PATCH /tables/{id}", tables.Update)
+
+	mux.HandleFunc("POST /reservations", reservations.Create)
+	mux.HandleFunc("GET /reservations", reservations.List)
+	mux.HandleFunc("GET /reservations/{id}", reservations.Get)
+	mux.HandleFunc("DELETE /reservations/{id}", reservations.Delete)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})

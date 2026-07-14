@@ -15,6 +15,180 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/reservations": {
+            "get": {
+                "description": "Filtros opcionais e combináveis. ` + "`" + `date` + "`" + ` é interpretado no fuso do restaurante, não em UTC.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "reservas"
+                ],
+                "summary": "Lista reservas",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "example": "2026-08-01",
+                        "description": "Dia da reserva, AAAA-MM-DD, no fuso do restaurante",
+                        "name": "date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filtra por mesa (UUID)",
+                        "name": "table_id",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "confirmed",
+                            "cancelled"
+                        ],
+                        "type": "string",
+                        "description": "confirmed ou cancelled",
+                        "name": "status",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/reservation.Reservation"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Parâmetro de filtro inválido",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Com ` + "`" + `table_id` + "`" + ` nulo ou omitido, o sistema aloca automaticamente a menor mesa livre que comporte o grupo. Com ` + "`" + `table_id` + "`" + ` informado, usa exatamente aquela mesa.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "reservas"
+                ],
+                "summary": "Cria uma reserva",
+                "parameters": [
+                    {
+                        "description": "Dados da reserva",
+                        "name": "reserva",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/reservation.createRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/reservation.Reservation"
+                        }
+                    },
+                    "400": {
+                        "description": "Dados inválidos, fora do expediente, mesa inativa ou grupo maior que a mesa",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Mesa pedida ocupada, ou nenhuma mesa disponível no horário",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/reservations/{id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "reservas"
+                ],
+                "summary": "Detalha uma reserva",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "ID da reserva (UUID)",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/reservation.Reservation"
+                        }
+                    },
+                    "400": {
+                        "description": "ID não é um UUID",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Reserva não encontrada",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Soft delete: a linha permanece com status ` + "`" + `cancelled` + "`" + ` e o horário é liberado para reuso. Idempotente — cancelar duas vezes devolve 204.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "reservas"
+                ],
+                "summary": "Cancela uma reserva",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "ID da reserva (UUID)",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Cancelada"
+                    },
+                    "400": {
+                        "description": "ID não é um UUID",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Reserva não encontrada",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/tables": {
             "get": {
                 "description": "Lista as mesas. Sem o parâmetro ` + "`" + `active` + "`" + `, devolve todas — ativas e inativas.",
@@ -201,6 +375,86 @@ const docTemplate = `{
                 "error": {
                     "type": "string",
                     "example": "Grupo de 6 pessoas excede a capacidade da mesa (4)."
+                }
+            }
+        },
+        "reservation.Reservation": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "customer_name": {
+                    "type": "string",
+                    "example": "Maria Silva"
+                },
+                "customer_phone": {
+                    "type": "string",
+                    "example": "11999998888"
+                },
+                "ends_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "party_size": {
+                    "type": "integer",
+                    "example": 4
+                },
+                "starts_at": {
+                    "type": "string"
+                },
+                "status": {
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/reservation.Status"
+                        }
+                    ],
+                    "example": "confirmed"
+                },
+                "table_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "reservation.Status": {
+            "type": "string",
+            "enum": [
+                "confirmed",
+                "cancelled"
+            ],
+            "x-enum-varnames": [
+                "StatusConfirmed",
+                "StatusCancelled"
+            ]
+        },
+        "reservation.createRequest": {
+            "type": "object",
+            "properties": {
+                "customer_name": {
+                    "type": "string",
+                    "example": "Maria Silva"
+                },
+                "customer_phone": {
+                    "type": "string",
+                    "example": "11999998888"
+                },
+                "ends_at": {
+                    "type": "string",
+                    "example": "2026-08-01T21:00:00-03:00"
+                },
+                "party_size": {
+                    "type": "integer",
+                    "example": 4
+                },
+                "starts_at": {
+                    "type": "string",
+                    "example": "2026-08-01T19:00:00-03:00"
+                },
+                "table_id": {
+                    "description": "Ponteiro: ausente ou null significa \"escolha a mesa por mim\" (heurística).\nPreenchido significa \"use esta mesa\" — e é o que decide se o retry roda.",
+                    "type": "string"
                 }
             }
         },

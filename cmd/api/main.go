@@ -15,6 +15,7 @@ import (
 
 	"reservas-restaurante/internal/config"
 	"reservas-restaurante/internal/httpserver"
+	"reservas-restaurante/internal/reservation"
 	"reservas-restaurante/internal/table"
 )
 
@@ -61,12 +62,31 @@ func run() error {
 	}
 	slog.Info("conectado no Postgres")
 
-	// O "container de injeção de dependência" do projeto são estas três linhas.
-	// Sem reflexão, sem scan de pacote, sem anotação: construtores chamados na
-	// ordem em que as dependências existem.
+	// O "container de injeção de dependência" do projeto é este trecho. Sem
+	// reflexão, sem scan de pacote, sem anotação: construtores chamados na ordem
+	// em que as dependências existem.
 	tableRepo := table.NewPostgresRepo(pool)
 	tableHandler := table.NewHandler(tableRepo)
-	router := httpserver.New(cfg, tableHandler)
+
+	// reservationRepo entra DUAS VEZES no allocator — como TableFinder e como
+	// ReservationCreator. É a mesma struct, fatiada por duas interfaces pequenas
+	// que o allocator declarou. Ele não sabe que é o mesmo objeto, e não precisa.
+	reservationRepo := reservation.NewPostgresRepo(pool, cfg.ServiceTZ)
+	allocator := reservation.NewAllocator(
+		reservationRepo,
+		reservationRepo,
+		// Aqui é onde a Config (infra) vira ServiceHours (domínio). O pacote
+		// reservation não importa config: quem traduz é o main.go.
+		reservation.ServiceHours{
+			Start: cfg.ServiceStart,
+			End:   cfg.ServiceEnd,
+			TZ:    cfg.ServiceTZ,
+		},
+		reservation.SystemClock{},
+	)
+	reservationHandler := reservation.NewHandler(allocator, reservationRepo)
+
+	router := httpserver.New(cfg, tableHandler, reservationHandler)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,

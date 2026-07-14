@@ -5,13 +5,11 @@ import { computed } from 'vue'
 const route = useRoute()
 const titulo = computed(() => (route.meta.titulo as string) ?? '')
 
-// A agenda ainda não existe — a rota entra na próxima fatia. Deixo o link no
-// lugar, desabilitado e HONESTO sobre isso, em vez de escondê-lo: quem abre o
-// sistema precisa saber o que ele vai ser, e um item cinza dizendo "em breve" é
-// mais informativo do que uma navegação que finge estar completa.
+// A Agenda vem primeiro porque é a tela do serviço — a que se abre cinquenta vezes
+// por noite. O Salão é manutenção: mexe-se nele uma vez por semestre.
 const navegacao = [
-  { para: '/mesas', rotulo: 'Salão', pronto: true },
-  { para: '/reservas', rotulo: 'Agenda', pronto: false },
+  { para: '/reservas', rotulo: 'Agenda' },
+  { para: '/mesas', rotulo: 'Salão' },
 ]
 </script>
 
@@ -37,31 +35,22 @@ const navegacao = [
         </div>
 
         <nav class="flex items-center gap-1">
-          <template v-for="item in navegacao" :key="item.para">
-            <RouterLink
-              v-if="item.pronto"
-              :to="item.para"
-              class="font-display text-ink-400 hover:text-ink-100 relative px-3 py-1.5 text-sm font-semibold tracking-wide uppercase transition-colors"
-              active-class="!text-ink-100"
-            >
-              {{ item.rotulo }}
-              <!-- O sublinhado de ativo é uma barra sólida de brasa, não uma
-                   pílula arredondada com fundo. Pílula é o vocabulário de todo
-                   dashboard genérico; a barra é o de um letreiro. -->
-              <span
-                v-if="$route.path.startsWith(item.para)"
-                class="bg-ember-500 absolute inset-x-3 -bottom-px h-0.5"
-              ></span>
-            </RouterLink>
-
+          <RouterLink
+            v-for="item in navegacao"
+            :key="item.para"
+            :to="item.para"
+            class="font-display text-ink-400 hover:text-ink-100 relative px-3 py-1.5 text-sm font-semibold tracking-wide uppercase transition-colors"
+            active-class="!text-ink-100"
+          >
+            {{ item.rotulo }}
+            <!-- O sublinhado de ativo é uma barra sólida de brasa, não uma pílula
+                 arredondada com fundo. Pílula é o vocabulário de todo dashboard
+                 genérico; a barra é o de um letreiro. -->
             <span
-              v-else
-              class="font-display text-ink-600 cursor-not-allowed px-3 py-1.5 text-sm font-semibold tracking-wide uppercase"
-              :title="`${item.rotulo}: próxima fatia`"
-            >
-              {{ item.rotulo }}
-            </span>
-          </template>
+              v-if="$route.path.startsWith(item.para)"
+              class="bg-ember-500 absolute inset-x-3 -bottom-px h-0.5"
+            ></span>
+          </RouterLink>
         </nav>
 
         <span v-if="titulo" class="rotulo ml-auto">{{ titulo }}</span>

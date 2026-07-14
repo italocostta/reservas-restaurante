@@ -82,7 +82,11 @@ Além do escopo previsto, entraram três coisas que a spec original não tinha e
 
 **A Fase 3a está concluída** (seção 14): combinação de mesas no caminho manual, com a `EXCLUDE` migrada de `reservations` para uma tabela de junção via **expand/contract**, sem o banco ficar desprotegido em nenhum instante. A **Fase 3b** (combinação automática) está **mapeada e deliberadamente não construída** — o custo é alto, o valor é baixo, e a decisão é melhor tomada por um humano olhando o salão.
 
-**O backend está completo.** O que resta é o frontend Vue, fora do escopo desta spec.
+**~~O backend está completo.~~** — a frase estava errada, e a seção 15 registra por quê. Ele estava completo *como backend*: ao começar o frontend, descobriu-se que a API não sabia responder duas perguntas que a **primeira tela** faz (*"que horas o restaurante abre?"* e *"quais mesas estão livres às 20h?"*), e que resolvê-las no cliente significava duplicar config e reimplementar em JavaScript a única lógica de domínio real do projeto. Corrigido com `GET /service-hours` e `GET /availability?date=` (seções 3 e 15).
+
+**A lição fica registrada:** *"o backend está completo"* é uma frase que **só o consumidor pode dizer** — e esta spec a escreveu sem ter um.
+
+**Agora sim o backend está completo**, e desta vez com um consumidor para provar. O que resta é o frontend Vue.
 
 ---
 
@@ -158,6 +162,15 @@ Impede duas reservas `confirmed` na mesma mesa com intervalos sobrepostos. A cl�
 | `GET` | `/reservations/{id}` | Detalhe |
 | `DELETE` | `/reservations/{id}` | Cancela (soft delete → `status = cancelled`) |
 | `GET` | `/tables/{id}/availability?date=` | Janelas livres da mesa no dia, dentro do horário de funcionamento (ver seção 7 — `SERVICE_START`/`SERVICE_END`/`TZ`) |
+
+### Restaurante (adicionados na seção 15, para o frontend)
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` | `/service-hours` | Expediente e fuso do restaurante. Existe para o frontend **não guardar uma cópia** de `SERVICE_START`/`SERVICE_END`/`SERVICE_TZ` |
+| `GET` | `/availability?date=` | **Grade do dia**: cada mesa ativa e suas janelas livres. É o que a tela de combinação (Fase 3a) precisa para o staff escolher quais mesas juntar |
+
+**As duas rotas não estavam na spec original e não são capricho de UI** — sem elas, o frontend precisaria duplicar config do backend e reimplementar o *sweep* do `availability.go` em JavaScript. O racional completo está na **seção 15**.
 
 ### Validações em camada de aplicação (antes do banco)
 
@@ -599,9 +612,13 @@ O teste de concorrência (1c) é **pulado** se `TEST_DATABASE_URL` não estiver 
 
 **No Windows, `go test -race` exige um compilador C** (`CGO_ENABLED=1` + gcc, ex: `scoop install gcc`). Sem isso o comando falha com `-race requires cgo`, e a Fase 1c não pode ser verificada.
 
-### Frontend (fora do escopo desta spec de backend)
+### Frontend
 
 Vue 3 (SPA) consumindo a API via REST. API deve ter CORS configurado para a origem do dev server Vue (`http://localhost:5173` por padrão via Vite).
+
+**Esta seção dizia "fora do escopo desta spec de backend", e a frase custou dois endpoints.** Ao começar o frontend descobriu-se que a API não sabia responder duas perguntas que qualquer tela precisa fazer — e que a saída fácil (resolver no cliente) significava duplicar config e reimplementar lógica de domínio em JavaScript. Corrigido na **seção 15**.
+
+O `SERVICE_START`/`SERVICE_END`/`SERVICE_TZ` **nunca vai para o `.env` do Vue**: o frontend lê de `GET /service-hours`. Config duplicada entre dois processos é a mesma classe de mentira que o teste de contrato existe para impedir na documentação — só que sem ninguém checando.
 
 ---
 
@@ -624,6 +641,7 @@ Para não serem confundidas com esquecimento durante a implementação:
 13. **Capacidade de uma combinação = soma das capacidades** (Fase 3a). É uma simplificação: duas mesas de 4 encostadas às vezes sentam 8, às vezes 6 (você perde os lugares das pontas que ficaram no meio), às vezes 10 (cabe gente nas quinas). Restaurante real tem regra própria, e ela não sai de uma fórmula. **A soma é o guarda-corpo, não a verdade** — ela impede um grupo de 20 em duas mesas de 4, e é só o que se pede dela.
 14. **Nada valida adjacência física** (Fase 3a). O sistema aceita combinar a `Mesa 01` com a `Mesa 08` mesmo que estejam em salões opostos. É consequência direta de não construir a 3b: sem grafo de adjacência, não há o que validar. **Quem garante que as mesas encostam é o humano que as escolheu** — o que é aceitável exatamente porque a combinação é manual.
 15. **O caminho automático não combina** (Fase 3a). Um grupo de 10 sem `table_ids` informado ainda recebe `409`, mesmo com 6+4 livres. Combinar automaticamente é a Fase 3b, deliberadamente não construída (seção 14).
+16. **Tipos do domínio escritos à mão em TypeScript**, não gerados do `swagger.json` (seção 15). Gerar acoplaria o build do frontend ao `swag init` para 4 tipos — custa mais do que resolve. **É o mesmo *drift* de sempre, na terceira encarnação**: código → doc (resolvido pelo teste de contrato) → spec (não resolvido, ver seção 12) → agora TS. Aceito porque o teste de contrato protege o lado que importa — o servidor —, mas **nada impede o TS de divergir do Go**, e o compilador do Vue vai concordar alegremente com um campo que não existe mais.
 
 > **Fechado:** o débito "`reservation/handler_test.go` não existe" foi resolvido. O arquivo cobre o parsing dos filtros (formato do `?date=`, enum do `?status=`, UUID do `?table_id=`), o `DisallowUnknownFields`, a conversão DTO→domínio (`table_id` ausente/null/informado), e — o mais importante — **o invariante do `ErrSlotTaken`**: se ele vazar do allocator, o handler devolve `500` com log de `INVARIANTE VIOLADO`, nunca um `409` disfarçado. Verificado que o teste falha ao mapear `ErrSlotTaken` para `409`, denunciando tanto o status errado quanto o vazamento da mensagem interna no corpo.
 
@@ -830,3 +848,68 @@ Sem ponteiro, ao contrário de todos os outros campos opcionais do projeto: **sl
 ### A validação de duplicata, que não é óbvia
 
 `table_ids: [A, A]` produziria duas linhas de junção com a mesma chave primária — um `23505` feio — **e, pior, contaria a capacidade da mesa A duas vezes**, deixando um grupo de 8 "caber" numa mesa de 4 informada em duplicata. **Erro de digitação virando overbooking.**
+
+---
+
+## 15. Preparação da API para o frontend
+
+> Escrita **ao começar o frontend**, e não antes. É o registro de um erro de planejamento desta spec, não de uma fase prevista.
+
+### O que a spec dizia sobre o frontend, e por que isso saiu caro
+
+Três linhas, na seção 7: *"Vue 3 (SPA) consumindo a API via REST"*, mais o CORS. Nada além disso — e a seção 1 registrava, com alívio, que **"o backend está completo"**.
+
+**Ele não estava.** Ele estava completo *como backend*. Nenhuma das perguntas abaixo tinha resposta, e as duas são perguntas que a **primeira tela** faz:
+
+| A pergunta | O que a API respondia | O que o frontend faria sem o endpoint |
+|---|---|---|
+| *"Que horas o restaurante abre?"* | nada | `SERVICE_START=18:00` no `.env` do Vue — **a mesma verdade em dois processos**, e nenhum teste vigiando a divergência |
+| *"Quais mesas estão livres às 20h?"* | só por mesa, e por dia | ou **N requisições** (uma por mesa, a cada mexida no horário), ou **reimplementar o `janelasLivres` em JavaScript** |
+
+A segunda linha é a grave. O `janelasLivres` é, nas palavras da própria seção 4, **"a única lógica de domínio real em Go do projeto"** — e o desenho da API estava empurrando uma cópia dela para o cliente. Não por decisão: por omissão.
+
+**A lição não é "faltaram dois endpoints".** É que *"o backend está completo"* é uma frase que **só o consumidor pode dizer**, e esta spec a escreveu sem ter um.
+
+### `GET /service-hours` — e por que não `/config`
+
+```json
+{"start": "18:00", "end": "23:00", "tz": "America/Sao_Paulo"}
+```
+
+O nome estreito é a defesa. **Um endpoint chamado `/config` é um convite**: daqui a seis meses alguém precisa de mais um campo no frontend, vê um balde chamado *config*, e joga lá dentro — e um dia o balde vaza algo que ninguém devia ver. Em `/service-hours` não cabe outra coisa sem ficar óbvio que está errado.
+
+A resposta é montada **uma vez, no boot**, e capturada pela closure do handler. Ela não pode mudar entre requisições — o `config.Load()` garante isso —, então recalculá-la a cada chamada fingiria uma dinâmica que não existe.
+
+### `GET /availability?date=` — a grade do dia
+
+```json
+[{"table_id": "…", "table_name": "Mesa 04", "capacity": 4,
+  "free_windows": [{"starts_at": "…", "ends_at": "…"}]}]
+```
+
+**Duas** idas ao banco para o salão inteiro, não N: `ListActiveTables` + `BusyWindowsAll` (uma query cada). O `DayGrid` **não recalcula janela nenhuma** — chama o *mesmo* `janelasLivres`, por mesa, sobre dados que já chegaram.
+
+E é isso que mantém o sweep num lugar só: com a grade na mão, *"quem está livre das 20h às 22h?"* é uma **checagem de contenção de intervalo** no cliente — um `.filter()`, não um algoritmo.
+
+**O `ORDER BY table_id, starts_at` do `busyWindowsAllSQL` é correção, não cosmética.** O `janelasLivres` é um sweep com cursor e **exige** as ocupadas ordenadas por início — a garantia precisa valer *dentro de cada mesa*. Um `ORDER BY table_id` sozinho compila, roda, e devolve janelas livres erradas **em silêncio**.
+
+### A URL segue a pergunta, não a tabela
+
+A seção 4 usou o princípio *"a URL não é a fronteira do domínio"* para justificar `GET /tables/{id}/availability` **morar em `reservation/`**. Aqui o mesmo princípio aponta para o lado oposto, e as duas conclusões estão certas:
+
+- `/tables/{id}/availability` → o sujeito é **uma mesa**. `{id}` no caminho.
+- `/availability?date=` → o sujeito é **o dia**. A mesa é o *resultado*, não o recurso. Não há `{id}` para pendurar, e enfiá-la em `/tables/availability` diria que a pergunta é sobre a coleção de mesas quando ela é sobre a agenda.
+
+### Redundância admitida
+
+`/tables/{id}/availability` e `/availability` respondem a mesma pergunta em granularidades diferentes. **O antigo não foi apagado** — é contrato público (seção 3) e tem semântica que o novo não tem: mesa **inativa** devolve `[]`, enquanto a grade simplesmente não a lista. Mas fica registrado: se o frontend nunca o chamar, é candidato a morrer.
+
+### O que o compilador provou, de novo
+
+Adicionar `DayGrid` à interface `schedule` do handler **quebrou o `fakeSchedule` dos testes** — e o `go build ./...` passou. Ou seja: o código de produção estava íntegro, e a única coisa desatualizada era o dublê. O compilador apontou para ele, e para mais nada.
+
+**Um `Mockito.mock()` teria ficado verde**, gerando o método novo sozinho, devolvendo `null`, e ignorando a capacidade nova em silêncio. Fake escrito à mão é uma struct que implementa uma interface de verdade: **método novo na interface é erro de compilação, sem exceção.** É o segundo dividendo da mesma decisão de arquitetura (seção 14, `TableID` → `TableIDs`).
+
+### Débito técnico novo
+
+Item **16** da seção 8: tipos do domínio escritos à mão em TypeScript, não gerados do `swagger.json`.

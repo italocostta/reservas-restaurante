@@ -67,6 +67,14 @@ API backend para gerenciamento de reservas de mesas em um restaurante único (se
 | **2** | Worker pool para notificação assíncrona pós-reserva | goroutines, channels, `context` para timeout |
 | **3 (futuro, não planejado em detalhe)** | Combinação de mesas | Redesenho de modelo — só após 1a/1b/1c estarem sólidas |
 
+### Estado da implementação
+
+**1a, 1b e 1c estão concluídas e verificadas.** A `EXCLUDE` foi provada contra o banco real (sobreposição bloqueada, limites `[)` confirmados, cancelamento liberando o horário); a heurística e o roteamento de erro têm testes sem banco; a concorrência foi validada com `go test -race -count=20`, 10 goroutines disputando a mesma mesa, sempre com exatamente um vencedor.
+
+Além do escopo previsto, entraram três coisas que a spec original não tinha e que se mostraram necessárias: **RLS** (seção 7), **testes de contrato contra o `swagger.json`** (seção 7) e o pacote **`httpx`** (seção 6). As três estão documentadas nas suas seções e no changelog da quarta rodada (seção 12).
+
+**Fase 2 não foi iniciada.**
+
 ---
 
 ## 2. Modelo de dados (Fase 1a)
@@ -152,8 +160,8 @@ Na criação de reserva:
 3. `starts_at` não pode ser no passado — **implementar via `Clock` injetável** (`interface { Now() time.Time }`), não `time.Now()` chamado direto dentro da função de validação. Sem isso, testes de unidade para este caso precisam de datas fixas no futuro que "expiram" sozinhas com o tempo, quebrando build meses depois sem relação com o código em si
 4. Mesa existe e `is_active = true` (quando `table_id` for informado)
 5. `party_size <= table.capacity`
-6. Checagem de overlap em app antes do `INSERT` (sabidamente com race condition na 1a — resolvida na 1c)
-7. Se a constraint do banco disparar mesmo assim (`23P01` — exclusion_violation), retornar `409 Conflict` com mensagem legível, nunca erro bruto do Postgres
+6. ~~Checagem de overlap em app antes do `INSERT`~~ — **removida na quarta rodada de revisão (seção 12).** A justificativa original era que a constraint SQL "não é o lugar para mensagem de erro amigável". Mas ela deixou de ser o lugar do erro bruto: o `23P01` é traduzido em `ErrSlotTaken` no repositório, que o allocator converte em `ErrTableUnavailable` / `ErrNoAvailability`, que o handler transforma em `409` com mensagem legível. **O objetivo da validação está atendido por outro meio.** O `SELECT` prévio, não: ele só somaria um round-trip e uma janela de corrida, sem entregar nada que o caminho de erro já não entregue
+7. Se a constraint do banco disparar (`23P01` — exclusion_violation), retornar `409 Conflict` com mensagem legível, nunca erro bruto do Postgres. **Este item, e não o #6, é o que garante a mensagem amigável**
 8. **`starts_at` deve estar dentro do horário de funcionamento** (`SERVICE_START` ≤ hora de `starts_at` convertida para `SERVICE_TZ` < `SERVICE_END`, seção 7). `ends_at` **pode** ultrapassar `SERVICE_END` — decisão deliberada para permitir a última reserva do dia (ex: mesa que senta às 22h30 com fechamento às 23h, terminando à meia-noite). Sem esta validação, o sistema aceitaria reservas fora do expediente (ex: 03h da manhã) que o endpoint `/availability` nunca refletiria como ocupação real, gerando inconsistência observável entre o que existe no banco e o que a UI mostra como disponível
 
 ### Formato de erro (v1 — mensagem humana apenas)
@@ -263,20 +271,67 @@ func (r *PostgresRepo) GetByID(ctx context.Context, id uuid.UUID) (table.Table, 
 func (r *PostgresRepo) Insert(ctx context.Context, res Reservation) (Reservation, error) { ... }
 ```
 
-Interfaces corrigidas, definidas pelo pacote `reservation` (consumidor), usando `table.Table` em vez de um `Table` local duplicado:
+**Quarta correção — o que a implementação de fato exigiu (seção 12):**
+
+1. **`GetByID` virou `GetTable`.** A terceira correção mandou os dois contratos morarem no mesmo struct (`PostgresRepo`). Mas esse struct também serve o `GET /reservations/{id}`, que precisa de um `Get(ctx, id) (Reservation, error)`. **Dois métodos com o mesmo nome no mesmo tipo não compilam em Go.** `GetTable` também é um nome melhor: `GetByID` num repositório que lida com dois agregados não diz *id de quê*.
+
+2. **`CreateReservation` virou método de um struct `Allocator`, não uma função livre.** A validação #3 exige um `Clock` injetável e a #8 exige o horário de funcionamento — a função livre viraria de seis parâmetros, e cada teste repetiria os quatro fixos. As dependências entram uma vez no construtor; o método recebe só o pedido.
+
+3. **`ServiceHours` e `Clock` são declarados pelo pacote `reservation`, não importados de `config`.** Se o domínio importasse `config`, a regra "reserva só dentro do expediente" passaria a depender de como as variáveis de ambiente estão organizadas. O `main.go` é quem traduz `Config` → `ServiceHours`.
+
+4. **`errors.go` tem quatro sentinelas e um tipo.** Sentinela responde "qual condição"; ela não consegue carregar *"Grupo de 6 pessoas excede a capacidade da mesa (4)"* — daí `ValidationError` ser um tipo. `errors.Is` para as sentinelas, `errors.As` para o tipo.
 
 ```go
+// reservation/errors.go
+var (
+    ErrSlotTaken        = errors.New("horário já ocupado nessa mesa")        // sinal INTERNO repo→allocator
+    ErrNoAvailability   = errors.New("nenhuma mesa disponível...")           // → 409
+    ErrTableUnavailable = errors.New("a mesa solicitada já está reservada...") // → 409
+    ErrNotFound         = errors.New("reserva não encontrada")               // → 404
+)
+
+type ValidationError struct{ Message string } // → 400, carrega os números do caso
+
+// reservation/allocator.go — declara tudo que consome; não importa pgx nem net/http
 type TableFinder interface {
     FindCandidates(ctx context.Context, partySize int, starts, ends time.Time) ([]table.Table, error)
-    GetByID(ctx context.Context, id uuid.UUID) (table.Table, error)
+    GetTable(ctx context.Context, id uuid.UUID) (table.Table, error)
 }
 
 type ReservationCreator interface {
     Insert(ctx context.Context, r Reservation) (Reservation, error)
 }
 
-func CreateReservation(ctx context.Context, finder TableFinder, creator ReservationCreator, req AllocationRequest) (Reservation, error)
+type Clock interface{ Now() time.Time }
+
+type ServiceHours struct {
+    Start, End time.Duration // desde a meia-noite, no fuso TZ
+    TZ         *time.Location
+}
+
+type Allocator struct { /* finder, creator, hours, clock */ }
+
+func NewAllocator(TableFinder, ReservationCreator, ServiceHours, Clock) *Allocator
+func (a *Allocator) CreateReservation(ctx context.Context, req AllocationRequest) (Reservation, error)
 ```
+
+### Disponibilidade — `GET /tables/{id}/availability` (seção 3)
+
+**A rota é de mesas; o código mora em `reservation`.** "Quais janelas desta mesa estão livres?" só se responde olhando `reservations` — é pergunta do domínio de reservas, exatamente como o `FindCandidates`. **A URL não é a fronteira do domínio.**
+
+Vive em `reservation/availability.go`, num tipo `Schedule` separado do `Allocator` (agenda não é alocação), e contém **a única lógica de domínio real em Go do projeto**: um *sweep* com cursor que subtrai as janelas ocupadas do expediente, recortando as reservas que ultrapassam o fechamento (permitidas pela validação #8). É também o único algoritmo aqui que não daria para empurrar para o SQL sem sofrimento — e por isso o único com teste de unidade de lógica de verdade.
+
+```go
+type ScheduleReader interface {
+    GetTable(ctx context.Context, id uuid.UUID) (table.Table, error)
+    BusyWindows(ctx context.Context, tableID uuid.UUID, from, to time.Time) ([]Window, error)
+}
+
+func NewSchedule(ScheduleReader, ServiceHours) *Schedule
+func (s *Schedule) FreeWindows(ctx context.Context, tableID uuid.UUID, dia string) ([]Window, error)
+```
+
+`ScheduleReader` **redeclara `GetTable`, que a `TableFinder` também tem — e isso não é duplicação.** São consumidores diferentes, cada um declarando o mínimo de que precisa; o `*PostgresRepo` satisfaz as duas sem saber que existem. Extrair uma superinterface comum acoplaria dois consumidores que não têm nada a ver um com o outro.
 
 ### O que a Fase 1b realmente testa sem banco — objetivo reescrito
 
@@ -310,33 +365,44 @@ Não trava linhas antecipadamente (`SELECT FOR UPDATE` foi avaliado e descartado
 A correção definitiva usa `errors.Is` contra o erro sentinela `ErrSlotTaken`, já traduzido na fronteira pela implementação concreta de `ReservationCreator` (seção 4, `reservation/repository.go` — único ponto do pacote que importa `pgconn`):
 
 ```go
-func CreateReservation(ctx context.Context, finder TableFinder, creator ReservationCreator, req AllocationRequest) (Reservation, error) {
-    // Caminho manual (table_id informado): sem retry.
-    // Uma colisão aqui é definitiva — não existe "próxima mesa" a tentar.
+const maxRetries = 3
+
+func (a *Allocator) CreateReservation(ctx context.Context, req AllocationRequest) (Reservation, error) {
+    if err := a.validarPedido(req); err != nil { // validações 1,2,3,8 — sem I/O
+        return Reservation{}, err
+    }
+
+    // Manual: SEM retry. A Mesa 12 vai colidir de novo na segunda tentativa e na
+    // terceira — não existe "próxima opção" a encontrar.
     if req.PreferredTableID != nil {
-        res, err := tryAllocateSpecific(ctx, finder, creator, req)
+        res, err := a.tryAllocateSpecific(ctx, req) // validações 4 e 5 acontecem aqui
         if errors.Is(err, ErrSlotTaken) {
             return Reservation{}, ErrTableUnavailable
         }
         return res, err
     }
 
-    // Caminho automático: retry faz sentido, pois a reconsulta pode
-    // encontrar outra mesa candidata que a tentativa anterior não via como ocupada.
-    const maxRetries = 3
-    for attempt := 0; attempt < maxRetries; attempt++ {
-        res, err := tryAllocateAutomatic(ctx, finder, creator, req)
+    // Automático: retry faz sentido porque a RECONSULTA enxerga um mundo novo —
+    // a mesa que acabou de ser tomada some das candidatas, e a próxima primeira
+    // da fila é OUTRA mesa.
+    for range maxRetries {
+        res, err := a.tryAllocateAutomatic(ctx, req)
         if err == nil {
             return res, nil
         }
         if errors.Is(err, ErrSlotTaken) {
             continue
         }
+        // Definitivo — inclusive ErrNoAvailability ("não existe mesa que sirva"),
+        // que sai na PRIMEIRA volta em vez de custar três consultas idênticas.
         return Reservation{}, err
     }
+
     return Reservation{}, ErrNoAvailability
 }
 ```
+
+**Invariante:** `ErrSlotTaken` nunca escapa desta função. Manual: convertido. Automático: vira `continue`, ou o loop esgota e vira `ErrNoAvailability`. O handler tem uma cláusula explícita para o caso de ele vazar mesmo assim — **`500` com log de `INVARIANTE VIOLADO`, e não um `409` disfarçado**. Erro de programação não pode se passar por erro de usuário: se ele responder bonito, ninguém nunca conserta.
 
 `allocator.go` não importa `pgx` nem `pgconn` em nenhum ponto — só conhece os três erros sentinela de domínio definidos em `reservation/errors.go` (seção 4): `ErrSlotTaken` (sinal interno de colisão, vindo do repositório), `ErrNoAvailability` e `ErrTableUnavailable` (erros finais expostos ao handler).
 
@@ -363,37 +429,55 @@ Organização por **domínio**, não por camada técnica (decisão deliberada co
 reservas-restaurante/
 ├── cmd/
 │   └── api/
-│       └── main.go              # monta dependências, sobe servidor
+│       └── main.go               # monta dependências, sobe servidor, shutdown gracioso
 ├── internal/
 │   ├── table/
-│   │   ├── model.go
-│   │   ├── repository.go        # implementação Postgres, só CRUD de restaurant_tables — não conhece reservations
-│   │   ├── handler.go           # handlers HTTP (/tables)
-│   │   └── handler_test.go
+│   │   ├── model.go              # Table, ErrNotFound, ErrDuplicateName
+│   │   ├── repository.go         # Postgres, só CRUD de restaurant_tables — não conhece reservations
+│   │   ├── handler.go            # handlers HTTP (/tables); declara a interface que consome
+│   │   ├── handler_test.go       # contra fake, sem banco
+│   │   └── contract_test.go      # valida as respostas contra o swagger.json
 │   ├── reservation/
-│   │   ├── model.go              # Reservation, AllocationRequest
-│   │   ├── errors.go             # ErrSlotTaken, ErrNoAvailability, ErrTableUnavailable
-│   │   ├── repository.go         # implementa TableFinder e ReservationCreator (join com restaurant_tables); único arquivo do pacote que importa pgconn/pgx
-│   │   ├── allocator.go          # CreateReservation — depende só de TableFinder/ReservationCreator; contém o retry (1c)
-│   │   ├── allocator_test.go     # testes de unidade (validações, roteamento de erro) e concorrência
-│   │   ├── handler.go            # handlers HTTP (/reservations)
-│   │   └── handler_test.go
+│   │   ├── model.go              # Reservation, AllocationRequest, Status
+│   │   ├── errors.go             # 4 sentinelas + ValidationError (seção 4)
+│   │   ├── repository.go         # implementa TableFinder, ReservationCreator e ScheduleReader;
+│   │   │                         # único arquivo do pacote que importa pgx/pgconn
+│   │   ├── allocator.go          # Allocator.CreateReservation + validações + retry (1c)
+│   │   ├── allocator_test.go     # validações e roteamento de erro, sem banco (1b)
+│   │   ├── availability.go       # Schedule.FreeWindows + o sweep de janelas (seção 4)
+│   │   ├── availability_test.go  # o sweep, sem banco
+│   │   ├── integration_test.go   # concorrência contra Postgres real (1c); pulado sem TEST_DATABASE_URL
+│   │   ├── handler.go            # handlers HTTP (/reservations e /tables/{id}/availability)
+│   │   └── contract_test.go      # valida as respostas contra o swagger.json
+│   ├── httpx/                    # PACOTE FOLHA — só stdlib. Ver "ciclo de import" abaixo
+│   │   └── response.go           # httpx.JSON, httpx.Error, ErrorResponse
+│   ├── openapitest/              # validador de contrato compartilhado (seção 7)
+│   │   └── openapitest.go
 │   ├── httpserver/
-│   │   ├── router.go             # monta rotas, injeta handlers
-│   │   ├── middleware.go         # logging, recovery, CORS
-│   │   └── response.go           # helpers JSON + erro padrão
+│   │   ├── router.go             # monta rotas, injeta handlers, aplica middlewares
+│   │   └── middleware.go         # logging, recovery, CORS, MaxBytes
 │   └── config/
-│       └── config.go             # variáveis de ambiente
+│       └── config.go             # variáveis de ambiente, validadas no boot
 ├── migrations/
-│   ├── 0001_create_tables.up.sql
-│   ├── 0001_create_tables.down.sql
-│   ├── 0002_create_reservations.up.sql
-│   └── 0002_create_reservations.down.sql
-├── docs/                          # gerado por swaggo — não editar manualmente
+│   ├── 0001_create_tables.{up,down}.sql
+│   ├── 0002_create_reservations.{up,down}.sql
+│   └── 0003_secure_schema_migrations.{up,down}.sql   # RLS — ver seção 7
+├── docs/                          # gerado por swaggo — VAI VERSIONADO (ver seção 7)
 ├── go.mod
 ├── go.sum
 └── .env.example
 ```
+
+### O ciclo de import que a versão anterior desta spec criava
+
+A versão anterior punha os helpers de JSON em `httpserver/response.go`. Mas `httpserver/router.go` **importa** `table` e `reservation` para montar as rotas. Se os pacotes de domínio importassem `httpserver` para usar os helpers:
+
+```
+httpserver ──importa──> table, reservation
+table      ──importa──> httpserver          ← ciclo. Go recusa compilar.
+```
+
+Não é questão de estilo: é erro de compilação. A correção é o pacote **folha** `internal/httpx`, que não importa nada interno e por isso pode ser importado por todos — inclusive pelo próprio `httpserver`.
 
 ### Racional das decisões de estrutura
 
@@ -446,13 +530,43 @@ SERVICE_TZ=America/Sao_Paulo
 
 `SERVICE_START`/`SERVICE_END`/`SERVICE_TZ` resolvem a lacuna do endpoint de disponibilidade (seção 3): sem horário de funcionamento definido em algum lugar do sistema, "janelas livres no dia" não tem limites para calcular, e `?date=` sobre uma coluna `timestamptz` não tem como definir "o dia" sem um timezone de referência. Ficam como configuração global do restaurante (não por mesa) nesta fase — consistente com a premissa de restaurante único da seção 1.
 
+### Row Level Security — a porta que o Supabase abre sem avisar
+
+**Descoberto durante a implementação; não estava previsto.** O débito técnico #4 ("sem autenticação, toda a API é aberta") se refere à *sua* API em Go. Mas o Supabase **expõe automaticamente todo o schema `public` via PostgREST**, com a chave `anon` — que é pública por design e vai no bundle do Vue. Sem fazer nada, qualquer pessoa com a URL do projeto consegue `DELETE` em `restaurant_tables` pelo endpoint REST do próprio Supabase, **contornando o backend inteiro**. Não é o "sem auth" que a spec aceitou: é uma segunda porta que ninguém sabia que estava aberta.
+
+Fecha de graça, com `ENABLE ROW LEVEL SECURITY` e **zero policies**:
+
+| Role | `BYPASSRLS` | Efeito |
+|---|---|---|
+| `postgres` (a API Go e o `golang-migrate`) | ✅ | não é afetada |
+| `service_role` | ✅ | não é afetada — **esta chave nunca pode ir para o frontend** |
+| `anon`, `authenticated` (PostgREST público) | ❌ | bloqueados |
+
+Aplicado às três tabelas — inclusive `schema_migrations`, que o `golang-migrate` cria sozinho, no `public` e sem RLS (migration `0003`). Sem isso, alguém com a chave `anon` poderia reescrever a versão do schema.
+
 ### CORS
 
-Middleware manual liberando apenas `CORS_ALLOWED_ORIGIN` (nunca `*`), mesmo em projeto de estudo.
+Middleware manual liberando apenas `CORS_ALLOWED_ORIGIN` (nunca `*`), mesmo em projeto de estudo. Com `Vary: Origin` — sem ele, um proxy pode cachear a resposta liberada para uma origem e entregá-la para outra.
 
-### Swagger
+### Swagger + teste de contrato
 
-Anotações (`@Summary`, `@Param`, `@Success`, etc.) são escritas diretamente nos handlers desde a primeira versão — não é retrabalho posterior. `swag init` aponta para `cmd/api/main.go` e gera `docs/docs.go` + `docs/swagger.json`.
+Anotações (`@Summary`, `@Param`, `@Success`, etc.) escritas direto nos handlers. `swag init -g cmd/api/main.go -o docs --parseInternal` gera `docs/`.
+
+**O `docs/` vai versionado**, mesmo sendo código gerado: o `router.go` faz `import _ "reservas-restaurante/docs"`, então sem ele o projeto não compila num clone limpo.
+
+**A crítica que a spec original não fazia:** documentação *code-first* é uma **narrativa sobre** o código, não uma **restrição sobre** ele. Nada garante que `@Success 201` seja verdade — se o handler passar a devolver `200`, a anotação continua lá, verde, mentindo, e o frontend confia.
+
+A saída **não** é migrar para spec-first (`oapi-codegen`): o gerador escreveria o `decode`, a validação e a assinatura do handler, apagando as três coisas que este projeto existe para ensinar. **Spec-first é melhor engenharia e pior pedagogia.**
+
+A saída adotada é o **teste de contrato** (`internal/openapitest`): carrega o `swagger.json` gerado, bate nos handlers reais com `httptest`, e falha se **(a)** o status devolvido não estiver declarado na anotação, ou **(b)** o corpo não bater com o schema. Recupera a garantia do spec-first sem abrir mão de escrever o handler à mão. Verificado que morde: trocar o `201` do `POST /tables` por `200` deixa o teste vermelho.
+
+`openapitest` é um pacote normal e não um `_test.go` porque **arquivos de teste não são importáveis entre pacotes**, e tanto `table` quanto `reservation` precisam do mesmo validador. O custo é honesto: um pacote que só testes usam fica na árvore de build.
+
+### Testes de integração e o `-race`
+
+O teste de concorrência (1c) é **pulado** se `TEST_DATABASE_URL` não estiver definida — variável **separada** da `DATABASE_URL` de propósito, para que `go test ./...` nunca escreva em produção por reuso acidental.
+
+**No Windows, `go test -race` exige um compilador C** (`CGO_ENABLED=1` + gcc, ex: `scoop install gcc`). Sem isso o comando falha com `-race requires cgo`, e a Fase 1c não pode ser verificada.
 
 ### Frontend (fora do escopo desta spec de backend)
 
@@ -467,8 +581,12 @@ Para não serem confundidas com esquecimento durante a implementação:
 1. **Erro sem `code` machine-readable** — v1 usa só string humana em `error`; migração futura é breaking change.
 2. **Sem combinação de mesas** — desperdício de capacidade em alguns cenários é aceito; resolver exige redesenho de modelo.
 3. **`maxRetries = 3` arbitrário** — pode causar livelock sob contenção extrema, não tratado nesta fase.
-4. **Sem autenticação** — staff assumido confiável; toda a API é aberta nesta fase.
+4. **Sem autenticação** — staff assumido confiável; toda a API em Go é aberta nesta fase. **Isto não vale para o PostgREST do Supabase**, que foi fechado com RLS (seção 7) — lá a exposição seria involuntária, não uma decisão.
 5. **Sem validação de formato de telefone** — `customer_phone` é texto livre na v1.
+6. **Retry sem backoff** — três tentativas imediatas, sem espera nem jitter. Para o volume de um restaurante é irrelevante; num teste de estresse com dezenas de goroutines, elas martelam o banco em rajada.
+7. **`PATCH /tables/{id}` é last-write-wins** — dois `PATCH` concorrentes na mesma mesa se sobrescrevem em silêncio. Não há `@Version`/optimistic locking. A concorrência que este projeto trata é a de *reservas* (via `EXCLUDE`), não a de edição de mesas.
+8. **`reservation/handler_test.go` não existe.** O `contract_test.go` cobre os status codes, mas não o parsing específico do handler de reservas (formato do `?date=`, enum do `?status=`, UUID do `?table_id=`, `DisallowUnknownFields`, conversão DTO→domínio). Lacuna conhecida, não fechada.
+9. **Nenhuma validação de duração máxima de reserva** — nada impede uma reserva de 12 horas.
 
 ---
 
@@ -499,3 +617,33 @@ Identificado antes de tocar em `table/repository.go` (segundo arquivo da ordem d
 1. **Ambiguidade sobre quem implementa `TableFinder`** (seções 4 e 6): o nome e o tipo de retorno (`[]Table`) sugeriam `table.PostgresRepo` como implementação natural, mas `FindCandidates` exige `JOIN` com `reservations` para filtrar overlap — se `table/repository.go` implementasse isso, o pacote `table` passaria a conhecer `reservations`, contradizendo a organização por domínio já declarada na seção 6. Corrigido: `table/repository.go` fica só com CRUD de `restaurant_tables`; `reservation/repository.go` implementa `TableFinder` **e** `ReservationCreator` num único struct, usando `table.Table` como tipo de retorno (import de `reservation` → `table`, sem ciclo). A relação entre os pacotes deixou de ser simétrica por design, não por descuido.
 2. **Árvore de pastas desatualizada** (seção 6): `table/repository.go` não define interface (nunca definiu — isso já estava certo), mas a rodada anterior ainda o descrevia como implementação de `TableFinder`, o que a correção #1 desfaz.
 3. **"Transação básica" como objetivo de aprendizado da 1a não correspondia a nenhum caso do desenho atual** (seção 1): com `INSERT` único protegido pela constraint `EXCLUDE`, não há multi-statement a coordenar. Removido do objetivo declarado da 1a — mesmo padrão de correção já aplicado ao objetivo da 1b (seção 4): quando o objetivo listado não corresponde ao que o código exercita, corrige-se o objetivo, não se inventa um caso artificial só para justificá-lo.
+
+---
+
+## 12. Changelog de revisão técnica — quarta rodada (pós-implementação)
+
+As três rodadas anteriores foram feitas **antes** de qualquer código. Esta é a primeira **depois**: com as fases 1a, 1b e 1c implementadas e verificadas, a spec havia divergido do código em sete pontos — e um documento de referência que mente é pior do que documento nenhum, porque alguém decide errado confiando nele.
+
+A ironia é registrada de propósito: este projeto construiu um **teste de contrato** justamente para impedir a documentação da API de mentir sobre os handlers. Um nível acima, a própria spec virou o documento desatualizado — o mesmo *drift*, só que sem ninguém checando.
+
+### Divergências corrigidas
+
+1. **Ciclo de import na estrutura de pastas** (seção 6): o layout original (`httpserver/response.go`) **não compilava** — `httpserver` importa os pacotes de domínio, então eles não podem importar `httpserver` de volta. Criado o pacote folha `internal/httpx`.
+
+2. **`TableFinder.GetByID` → `GetTable`** (seção 4): colidia com o `Get(ctx, id) (Reservation, error)` que o mesmo `PostgresRepo` precisa expor para o `GET /reservations/{id}`. Dois métodos homônimos no mesmo tipo não compilam.
+
+3. **`CreateReservation` virou método de `*Allocator`** (seções 4 e 5): a função livre precisaria de seis parâmetros depois que o `Clock` (validação #3) e o `ServiceHours` (validação #8) entraram.
+
+4. **`errors.go` tem quatro sentinelas e um tipo** (seção 4): faltavam `ErrNotFound` e o `ValidationError` — sentinela não carrega os números do caso concreto, e o formato de erro da seção 3 exige que carregue.
+
+5. **Validação #6 removida** (seção 3): o objetivo dela (mensagem amigável em vez de erro bruto do Postgres) já é atendido pela tradução `23P01` → `ErrSlotTaken` → `ErrTableUnavailable`. O `SELECT` prévio só somaria round-trip e janela de corrida.
+
+6. **RLS não estava previsto e era necessário** (seção 7): o Supabase expõe o schema `public` via PostgREST com a chave `anon`, que é pública. O débito #4 ("sem auth") era uma decisão sobre a API em Go; a exposição do PostgREST teria sido um acidente.
+
+7. **Estrutura de pastas incompleta** (seção 6): faltavam `availability.go`, `openapitest/`, os testes de contrato e de integração, e a migration `0003`.
+
+### Adições que a spec original não previa
+
+- **Teste de contrato contra o `swagger.json`** (seção 7) — sem ele, a doc *code-first* pode mentir indefinidamente.
+- **`GET /tables/{id}/availability` implementado em `reservation/`**, não em `table/` (seção 4) — a URL não é a fronteira do domínio.
+- **Quatro débitos técnicos novos** (seção 8, itens 6 a 9), incluindo a lacuna do `reservation/handler_test.go`.

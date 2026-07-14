@@ -69,7 +69,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Com ` + "`" + `table_id` + "`" + ` nulo ou omitido, o sistema aloca automaticamente a menor mesa livre que comporte o grupo. Com ` + "`" + `table_id` + "`" + ` informado, usa exatamente aquela mesa.",
+                "description": "` + "`" + `table_ids` + "`" + ` vazio ou omitido: o sistema aloca automaticamente a menor mesa livre que comporte o grupo. Com uma mesa: usa exatamente aquela. Com várias: registra uma COMBINAÇÃO (o staff empurrou as mesas), validando a capacidade somada e protegendo cada mesa individualmente contra sobreposição.",
                 "consumes": [
                     "application/json"
                 ],
@@ -99,13 +99,13 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Dados inválidos, fora do expediente, mesa inativa ou grupo maior que a mesa",
+                        "description": "Dados inválidos, fora do expediente, mesa inativa/inexistente/repetida, ou grupo maior que a capacidade",
                         "schema": {
                             "$ref": "#/definitions/httpx.ErrorResponse"
                         }
                     },
                     "409": {
-                        "description": "Mesa pedida ocupada, ou nenhuma mesa disponível no horário",
+                        "description": "Mesa(s) pedida(s) ocupada(s), ou nenhuma mesa disponível no horário",
                         "schema": {
                             "$ref": "#/definitions/httpx.ErrorResponse"
                         }
@@ -459,8 +459,11 @@ const docTemplate = `{
                     ],
                     "example": "confirmed"
                 },
-                "table_id": {
-                    "type": "string"
+                "table_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -509,9 +512,12 @@ const docTemplate = `{
                     "type": "string",
                     "example": "2026-08-01T19:00:00-03:00"
                 },
-                "table_id": {
-                    "description": "Ponteiro: ausente ou null significa \"escolha a mesa por mim\" (heurística).\nPreenchido significa \"use esta mesa\" — e é o que decide se o retry roda.",
-                    "type": "string"
+                "table_ids": {
+                    "description": "Ausente, null ou vazio → \"escolha a mesa por mim\" (heurística automática).\nUma mesa  → override manual.\nVárias    → COMBINAÇÃO: o staff empurrou as mesas, o sistema registra e\n            protege cada uma delas com a EXCLUDE (Fase 3a).\n\nEra ` + "`" + `table_id` + "`" + ` (uuid único) até a Fase 3a. Mudança quebrada de contrato,\nfeita agora porque o frontend ainda não existe — depois dele, custaria o\ndobro.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },

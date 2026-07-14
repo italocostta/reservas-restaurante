@@ -25,7 +25,7 @@ func TestRespostasBatemComOSwagger(t *testing.T) {
 	id := uuid.New()
 	mesaID := uuid.New()
 	res := Reservation{
-		ID: id, TableID: mesaID,
+		ID: id, TableIDs: []uuid.UUID{mesaID},
 		CustomerName: "Maria Silva", CustomerPhone: "11999998888",
 		PartySize: 4,
 		StartsAt:  em(20, 19, 0), EndsAt: em(20, 21, 0),

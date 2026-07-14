@@ -177,12 +177,12 @@ func TestConcorrenciaCaminhoManual(t *testing.T) {
 	const n = 10
 	erros := disparar(n, func() error {
 		_, err := alloc.CreateReservation(context.Background(), AllocationRequest{
-			PreferredTableID: &tableID,
-			CustomerName:     "Cliente",
-			CustomerPhone:    "11999998888",
-			PartySize:        capacidadeDeTeste,
-			StartsAt:         inicio,
-			EndsAt:           fim,
+			PreferredTableIDs: []uuid.UUID{tableID},
+			CustomerName:      "Cliente",
+			CustomerPhone:     "11999998888",
+			PartySize:         capacidadeDeTeste,
+			StartsAt:          inicio,
+			EndsAt:            fim,
 		})
 		return err
 	})

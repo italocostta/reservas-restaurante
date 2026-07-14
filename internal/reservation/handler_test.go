@@ -174,17 +174,26 @@ func TestCreateNaoDisfarcaErrSlotTakenDe409(t *testing.T) {
 }
 
 // A conversão DTO → domínio: seis linhas no handler que em Java seriam MapStruct.
+// Os três significados de `table_ids` têm que atravessar o JSON intactos, porque
+// é esse campo que decide entre heurística, override manual e combinação.
 func TestCreateConverteORequestParaODominio(t *testing.T) {
-	mesaID := uuid.New()
+	mesaA := uuid.New()
+	mesaB := uuid.New()
 
 	casos := []struct {
-		nome        string
-		tableIDJSON string
-		querMesa    *uuid.UUID
+		nome         string
+		tableIDsJSON string
+		querMesas    []uuid.UUID
 	}{
-		{"sem table_id: aloca automaticamente", ``, nil},
-		{"table_id null: aloca automaticamente", `"table_id":null,`, nil},
-		{"table_id informado: usa a mesa pedida", `"table_id":"` + mesaID.String() + `",`, &mesaID},
+		{"ausente: aloca automaticamente", ``, nil},
+		{"null: aloca automaticamente", `"table_ids":null,`, nil},
+		{"lista vazia: aloca automaticamente", `"table_ids":[],`, nil},
+		{"uma mesa: override manual", `"table_ids":["` + mesaA.String() + `"],`, []uuid.UUID{mesaA}},
+		{
+			"duas mesas: combinação",
+			`"table_ids":["` + mesaA.String() + `","` + mesaB.String() + `"],`,
+			[]uuid.UUID{mesaA, mesaB},
+		},
 	}
 
 	for _, tc := range casos {
@@ -193,7 +202,7 @@ func TestCreateConverteORequestParaODominio(t *testing.T) {
 				return Reservation{}, nil
 			}}
 
-			corpo := `{` + tc.tableIDJSON + `"customer_name":"Maria Silva","customer_phone":"11999998888",` +
+			corpo := `{` + tc.tableIDsJSON + `"customer_name":"Maria Silva","customer_phone":"11999998888",` +
 				`"party_size":4,"starts_at":"2026-07-20T19:00:00-03:00","ends_at":"2026-07-20T21:00:00-03:00"}`
 
 			NewHandler(alloc, &fakeRepo{}, &fakeSchedule{}).Create(
@@ -203,13 +212,14 @@ func TestCreateConverteORequestParaODominio(t *testing.T) {
 				t.Fatalf("domínio chamado %d vez(es), quero 1", alloc.calls)
 			}
 
-			switch {
-			case tc.querMesa == nil && alloc.visto.PreferredTableID != nil:
-				t.Errorf("PreferredTableID = %v, quero nil (heurística automática)", *alloc.visto.PreferredTableID)
-			case tc.querMesa != nil && alloc.visto.PreferredTableID == nil:
-				t.Error("PreferredTableID = nil, quero a mesa pedida — o caminho manual foi perdido")
-			case tc.querMesa != nil && *alloc.visto.PreferredTableID != *tc.querMesa:
-				t.Errorf("PreferredTableID = %v, quero %v", *alloc.visto.PreferredTableID, *tc.querMesa)
+			vistas := alloc.visto.PreferredTableIDs
+			if len(vistas) != len(tc.querMesas) {
+				t.Fatalf("PreferredTableIDs = %v, quero %v", vistas, tc.querMesas)
+			}
+			for i := range vistas {
+				if vistas[i] != tc.querMesas[i] {
+					t.Errorf("mesa %d = %v, quero %v", i, vistas[i], tc.querMesas[i])
+				}
 			}
 
 			// O instante tem que sobreviver ao parse do JSON.

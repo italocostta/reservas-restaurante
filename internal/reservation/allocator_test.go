@@ -21,7 +21,7 @@ import (
 
 type fakeFinder struct {
 	findFn func(ctx context.Context, partySize int, starts, ends time.Time) ([]table.Table, error)
-	getFn  func(ctx context.Context, id uuid.UUID) (table.Table, error)
+	getFn  func(ctx context.Context, ids []uuid.UUID) ([]table.Table, error)
 
 	findCalls int
 	getCalls  int
@@ -32,9 +32,22 @@ func (f *fakeFinder) FindCandidates(ctx context.Context, partySize int, starts, 
 	return f.findFn(ctx, partySize, starts, ends)
 }
 
-func (f *fakeFinder) GetTable(ctx context.Context, id uuid.UUID) (table.Table, error) {
+func (f *fakeFinder) GetTables(ctx context.Context, ids []uuid.UUID) ([]table.Table, error) {
 	f.getCalls++
-	return f.getFn(ctx, id)
+	return f.getFn(ctx, ids)
+}
+
+// devolve monta um getFn que sempre responde com as mesmas mesas.
+func devolve(mesas ...table.Table) func(context.Context, []uuid.UUID) ([]table.Table, error) {
+	return func(context.Context, []uuid.UUID) ([]table.Table, error) { return mesas, nil }
+}
+
+func ids(mesas ...table.Table) []uuid.UUID {
+	out := make([]uuid.UUID, len(mesas))
+	for i, m := range mesas {
+		out[i] = m.ID
+	}
+	return out
 }
 
 type fakeCreator struct {
@@ -169,17 +182,17 @@ func TestFimPodeUltrapassarOFechamento(t *testing.T) {
 
 // ---------- caminho manual ----------
 
-// O TESTE CENTRAL da fase. Se o caminho manual retentar, ele fica vermelho.
+// O TESTE CENTRAL da fase 1c. Se o caminho manual retentar, ele fica vermelho.
 func TestManualNaoRetentaEDizAVerdade(t *testing.T) {
 	m := mesa("Mesa 12", 4)
 
-	finder := &fakeFinder{getFn: func(context.Context, uuid.UUID) (table.Table, error) { return m, nil }}
+	finder := &fakeFinder{getFn: devolve(m)}
 	creator := &fakeCreator{insertFn: func(context.Context, Reservation) (Reservation, error) {
 		return Reservation{}, ErrSlotTaken // colide sempre
 	}}
 
 	req := pedido()
-	req.PreferredTableID = &m.ID
+	req.PreferredTableIDs = ids(m)
 
 	_, err := novoAllocator(finder, creator).CreateReservation(context.Background(), req)
 
@@ -194,37 +207,66 @@ func TestManualNaoRetentaEDizAVerdade(t *testing.T) {
 	}
 }
 
-func TestManualValidaAMesa(t *testing.T) {
+func TestManualValidaAsMesas(t *testing.T) {
 	inativa := mesa("Mesa Fundos", 4)
 	inativa.IsActive = false
 
 	pequena := mesa("Mesa 2", 2)
+	quatroA := mesa("Mesa A", 4)
+	quatroB := mesa("Mesa B", 4)
 
 	casos := []struct {
-		nome   string
-		getFn  func(context.Context, uuid.UUID) (table.Table, error)
-		grupo  int
-		trecho string
+		nome       string
+		pedidas    []uuid.UUID
+		devolvidas []table.Table
+		grupo      int
+		trecho     string
 	}{
-		{"mesa não existe", func(context.Context, uuid.UUID) (table.Table, error) {
-			return table.Table{}, table.ErrNotFound
-		}, 2, "não existe"},
-		{"mesa inativa", func(context.Context, uuid.UUID) (table.Table, error) {
-			return inativa, nil
-		}, 2, "inativa"},
-		{"grupo excede a capacidade", func(context.Context, uuid.UUID) (table.Table, error) {
-			return pequena, nil
-		}, 6, "excede a capacidade"},
+		{
+			// O repositório devolve as que achou; pedir 1 e receber 0 é o sinal.
+			nome:    "mesa não existe",
+			pedidas: []uuid.UUID{uuid.New()}, devolvidas: nil,
+			grupo: 2, trecho: "não existem",
+		},
+		{
+			nome:    "mesa inativa",
+			pedidas: ids(inativa), devolvidas: []table.Table{inativa},
+			grupo: 2, trecho: "inativa",
+		},
+		{
+			nome:    "grupo excede a capacidade de uma mesa",
+			pedidas: ids(pequena), devolvidas: []table.Table{pequena},
+			grupo: 6, trecho: "excede a capacidade da mesa",
+		},
+		{
+			// Fase 3a: a soma das duas é 8; um grupo de 10 não cabe.
+			nome:    "grupo excede a capacidade COMBINADA",
+			pedidas: ids(quatroA, quatroB), devolvidas: []table.Table{quatroA, quatroB},
+			grupo: 10, trecho: "capacidade combinada",
+		},
+		{
+			// Digitação repetida contaria a capacidade duas vezes: um grupo de 8
+			// "caberia" numa mesa de 4 informada em duplicata. Erro de digitação
+			// virando overbooking.
+			nome:    "mesma mesa informada duas vezes",
+			pedidas: []uuid.UUID{quatroA.ID, quatroA.ID}, devolvidas: []table.Table{quatroA},
+			grupo: 8, trecho: "mais de uma vez",
+		},
+		{
+			nome:       "pediu três mesas, uma não existe",
+			pedidas:    []uuid.UUID{quatroA.ID, quatroB.ID, uuid.New()},
+			devolvidas: []table.Table{quatroA, quatroB},
+			grupo:      6, trecho: "não existem",
+		},
 	}
 
 	for _, tc := range casos {
 		t.Run(tc.nome, func(t *testing.T) {
-			finder := &fakeFinder{getFn: tc.getFn}
+			finder := &fakeFinder{getFn: devolve(tc.devolvidas...)}
 			creator := &fakeCreator{}
 
-			id := uuid.New()
 			req := pedido()
-			req.PreferredTableID = &id
+			req.PreferredTableIDs = tc.pedidas
 			req.PartySize = tc.grupo
 
 			_, err := novoAllocator(finder, creator).CreateReservation(context.Background(), req)
@@ -243,6 +285,65 @@ func TestManualValidaAMesa(t *testing.T) {
 	}
 }
 
+// ---------- combinação (Fase 3a) ----------
+
+// A razão de existir da Fase 3a: um grupo de 8 num salão cuja maior mesa é 4.
+// Antes, isso era um 409 mentiroso — o restaurante CONSEGUE sentar 8, empurrando
+// duas mesas. O sistema recusava uma reserva que a casa aceitaria.
+func TestCombinacaoAceitaGrupoMaiorQueQualquerMesa(t *testing.T) {
+	a := mesa("Mesa A", 4)
+	b := mesa("Mesa B", 4)
+
+	finder := &fakeFinder{getFn: devolve(a, b)}
+
+	var reservadas []uuid.UUID
+	creator := &fakeCreator{insertFn: func(_ context.Context, r Reservation) (Reservation, error) {
+		reservadas = r.TableIDs
+		return r, nil
+	}}
+
+	req := pedido()
+	req.PreferredTableIDs = ids(a, b)
+	req.PartySize = 8 // não cabe em NENHUMA mesa sozinha
+
+	if _, err := novoAllocator(finder, creator).CreateReservation(context.Background(), req); err != nil {
+		t.Fatalf("erro = %v, quero sucesso — 4+4 comporta 8", err)
+	}
+	if len(reservadas) != 2 {
+		t.Fatalf("reservou %d mesas, quero 2", len(reservadas))
+	}
+
+	// A heurística automática NÃO foi consultada: o staff já decidiu.
+	if finder.findCalls != 0 {
+		t.Errorf("FindCandidates chamado %d vezes numa combinação manual, quero 0", finder.findCalls)
+	}
+}
+
+// Combinação é caminho MANUAL: colisão é definitiva, sem retry. As mesmas mesas
+// vão colidir de novo na segunda tentativa.
+func TestCombinacaoNaoRetenta(t *testing.T) {
+	a := mesa("Mesa A", 4)
+	b := mesa("Mesa B", 4)
+
+	finder := &fakeFinder{getFn: devolve(a, b)}
+	creator := &fakeCreator{insertFn: func(context.Context, Reservation) (Reservation, error) {
+		return Reservation{}, ErrSlotTaken
+	}}
+
+	req := pedido()
+	req.PreferredTableIDs = ids(a, b)
+	req.PartySize = 8
+
+	_, err := novoAllocator(finder, creator).CreateReservation(context.Background(), req)
+
+	if !errors.Is(err, ErrTableUnavailable) {
+		t.Fatalf("erro = %v, quero ErrTableUnavailable", err)
+	}
+	if creator.calls != 1 {
+		t.Errorf("Insert chamado %d vez(es), quero 1 — combinação não retenta", creator.calls)
+	}
+}
+
 // ---------- caminho automático ----------
 
 // A heurística é candidatas[0] — e a ordem vem do ORDER BY capacity ASC do SQL.
@@ -255,16 +356,21 @@ func TestAutomaticoPegaAPrimeiraCandidata(t *testing.T) {
 		return []table.Table{menor, maior}, nil // já ordenadas, como o SQL entrega
 	}}
 
-	var reservada uuid.UUID
+	var reservadas []uuid.UUID
 	creator := &fakeCreator{insertFn: func(_ context.Context, r Reservation) (Reservation, error) {
-		reservada = r.TableID
+		reservadas = r.TableIDs
 		return r, nil
 	}}
 
 	if _, err := novoAllocator(finder, creator).CreateReservation(context.Background(), pedido()); err != nil {
 		t.Fatalf("erro = %v, quero sucesso", err)
 	}
-	if reservada != menor.ID {
+	// O caminho automático reserva UMA mesa. Combinar automaticamente é a Fase 3b,
+	// deliberadamente não construída.
+	if len(reservadas) != 1 {
+		t.Fatalf("reservou %d mesas, quero 1 — o automático não combina", len(reservadas))
+	}
+	if reservadas[0] != menor.ID {
 		t.Errorf("reservou a mesa errada — quero a menor suficiente (%s)", menor.Name)
 	}
 }
@@ -307,10 +413,10 @@ func TestAutomaticoReconsultaEAchaOutraMesa(t *testing.T) {
 	creator := &fakeCreator{}
 	var reservada uuid.UUID
 	creator.insertFn = func(_ context.Context, r Reservation) (Reservation, error) {
-		if r.TableID == tomada.ID {
+		if r.TableIDs[0] == tomada.ID {
 			return Reservation{}, ErrSlotTaken
 		}
-		reservada = r.TableID
+		reservada = r.TableIDs[0]
 		return r, nil
 	}
 

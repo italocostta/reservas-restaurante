@@ -35,10 +35,19 @@ func New(cfg config.Config, tables *table.Handler, reservations *reservation.Han
 	// availability não conflita com /tables/{id}.
 	mux.HandleFunc("GET /tables/{id}/availability", reservations.Availability)
 
+	// A grade do salão inteiro. Sem {id} no caminho porque a pergunta não é sobre
+	// uma mesa — é sobre o dia. Fica fora de /tables/ pelo mesmo motivo que o
+	// availability de uma mesa fica DENTRO: a URL segue a pergunta, não a tabela.
+	mux.HandleFunc("GET /availability", reservations.DayAvailability)
+
 	mux.HandleFunc("POST /reservations", reservations.Create)
 	mux.HandleFunc("GET /reservations", reservations.List)
 	mux.HandleFunc("GET /reservations/{id}", reservations.Get)
 	mux.HandleFunc("DELETE /reservations/{id}", reservations.Delete)
+
+	// O expediente é a única parte da config que sai pela API: o frontend precisa
+	// dele para desenhar a grade do dia e para não oferecer horário fechado.
+	mux.HandleFunc("GET /service-hours", serviceHours(cfg))
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})

@@ -57,15 +57,22 @@ func (f *fakeRepo) Cancel(ctx context.Context, id uuid.UUID) error {
 }
 
 type fakeSchedule struct {
-	fn    func(context.Context, uuid.UUID, string) ([]Window, error)
-	calls int
-	dia   string // o último dia que chegou
+	fn     func(context.Context, uuid.UUID, string) ([]Window, error)
+	gridFn func(context.Context, string) ([]TableAvailability, error)
+	calls  int
+	dia    string // o último dia que chegou
 }
 
 func (f *fakeSchedule) FreeWindows(ctx context.Context, id uuid.UUID, dia string) ([]Window, error) {
 	f.calls++
 	f.dia = dia
 	return f.fn(ctx, id, dia)
+}
+
+func (f *fakeSchedule) DayGrid(ctx context.Context, dia string) ([]TableAvailability, error) {
+	f.calls++
+	f.dia = dia
+	return f.gridFn(ctx, dia)
 }
 
 func comPathValue(r *http.Request, id uuid.UUID) *http.Request {
@@ -430,5 +437,67 @@ func TestAvailability(t *testing.T) {
 				t.Errorf("dia repassado = %q, quero \"2026-07-20\"", sched.dia)
 			}
 		})
+	}
+}
+
+// ---------- GET /availability ----------
+
+func TestDayAvailability(t *testing.T) {
+	casos := []struct {
+		nome       string
+		query      string
+		wantStatus int
+		wantCalls  int
+	}{
+		{"sucesso", "?date=2026-07-20", http.StatusOK, 1},
+		{"sem date", "", http.StatusBadRequest, 0},
+		// O FORMATO do date NÃO é validado aqui, ao contrário do ?date= do List:
+		// quem sabe transformar um dia em expediente é o Schedule (expedienteDe), e
+		// ele já devolve ValidationError → 400. Duplicar o time.Parse no handler
+		// seria escrever a mesma regra em dois lugares para chegar ao mesmo status.
+		// O que este caso prova é que o handler NÃO barra sozinho: ele deixa passar
+		// e a agenda é chamada.
+		{"date malformado chega ao domínio", "?date=20/07/2026", http.StatusOK, 1},
+	}
+
+	for _, tc := range casos {
+		t.Run(tc.nome, func(t *testing.T) {
+			sched := &fakeSchedule{gridFn: func(_ context.Context, dia string) ([]TableAvailability, error) {
+				return []TableAvailability{{
+					TableID:     uuid.New(),
+					TableName:   "Mesa 04",
+					Capacity:    4,
+					FreeWindows: []Window{jan(20, 18, 0, 20, 19, 0)},
+				}}, nil
+			}}
+
+			rec := httptest.NewRecorder()
+			NewHandler(&fakeAllocator{}, &fakeRepo{}, sched).DayAvailability(
+				rec, httptest.NewRequest(http.MethodGet, "/availability"+tc.query, nil))
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, quero %d (corpo: %s)", rec.Code, tc.wantStatus, rec.Body)
+			}
+			if sched.calls != tc.wantCalls {
+				t.Errorf("agenda chamada %d vez(es), quero %d", sched.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// A grade vazia (nenhuma mesa ativa) tem que sair como [] e não null, pela mesma
+// razão do TestListVaziaSerializaComoArray: um frontend que faz .map() no corpo
+// quebra com null, e "não há mesas" é uma resposta legítima, não um erro.
+func TestGradeVaziaSerializaComoArray(t *testing.T) {
+	sched := &fakeSchedule{gridFn: func(context.Context, string) ([]TableAvailability, error) {
+		return []TableAvailability{}, nil
+	}}
+
+	rec := httptest.NewRecorder()
+	NewHandler(&fakeAllocator{}, &fakeRepo{}, sched).DayAvailability(
+		rec, httptest.NewRequest(http.MethodGet, "/availability?date=2026-07-20", nil))
+
+	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+		t.Errorf("corpo = %s, quero []", got)
 	}
 }

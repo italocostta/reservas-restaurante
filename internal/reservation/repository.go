@@ -375,6 +375,92 @@ func (r *PostgresRepo) BusyWindows(ctx context.Context, tableID uuid.UUID, from,
 	return ocupadas, nil
 }
 
+const listActiveTablesSQL = `
+SELECT id, name, capacity, is_active, created_at
+FROM restaurant_tables
+WHERE is_active = true
+ORDER BY name`
+
+// ListActiveTables devolve o salão: as mesas que a grade do dia precisa mostrar.
+//
+// Não reusa table.PostgresRepo.List(active=true), e isso é deliberado — é o mesmo
+// princípio que já justificou o GetTable existir aqui em vez de o Schedule
+// importar o pacote table: quem consome define a interface. Fazer o Schedule
+// depender de table.PostgresRepo religaria os dois domínios que a seção 4 da spec
+// separou de propósito, para economizar uma query de cinco linhas.
+func (r *PostgresRepo) ListActiveTables(ctx context.Context) ([]table.Table, error) {
+	rows, err := r.db.Query(ctx, listActiveTablesSQL)
+	if err != nil {
+		return nil, fmt.Errorf("listando mesas ativas: %w", err)
+	}
+	defer rows.Close()
+
+	mesas := []table.Table{}
+	for rows.Next() {
+		var t table.Table
+		if err := rows.Scan(&t.ID, &t.Name, &t.Capacity, &t.IsActive, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("lendo mesa ativa: %w", err)
+		}
+		mesas = append(mesas, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listando mesas ativas: %w", err)
+	}
+
+	return mesas, nil
+}
+
+// Mesmo predicado do busyWindowsSQL, sem o `table_id = $1`: as ocupações de TODAS
+// as mesas na janela, de uma vez.
+//
+// O ORDER BY table_id, starts_at não é cosmético. O janelasLivres é um sweep com
+// cursor: ele EXIGE as ocupadas ordenadas por início, e a documentação dele diz
+// "o ORDER BY do SQL garante isso". Aqui a garantia precisa valer por mesa, não
+// só globalmente — daí as duas colunas. Trocar por um ORDER BY só de table_id
+// devolveria janelas livres erradas, em silêncio.
+const busyWindowsAllSQL = `
+SELECT table_id, starts_at, ends_at
+FROM reservation_tables
+WHERE status = 'confirmed'
+  AND tstzrange(starts_at, ends_at) && tstzrange($1, $2)
+ORDER BY table_id, starts_at`
+
+// BusyWindowsAll é o BusyWindows sem o recorte por mesa: uma query para o salão
+// inteiro, em vez de uma por mesa.
+//
+// É o motivo de este endpoint existir. Montar a grade do dia chamando
+// BusyWindows N vezes seria um N+1 clássico — 20 mesas, 20 round-trips, a cada
+// vez que o staff mexesse no horário na tela. O banco responde a pergunta inteira
+// de uma vez porque ela É uma pergunta só.
+//
+// Devolve map e não slice porque o consumidor (o DayGrid) vai iterar as MESAS e
+// perguntar "quais as ocupadas desta?" — e o zero value do map já responde a mesa
+// sem nenhuma reserva: `ocupadas[id]` num id ausente devolve nil, e
+// `janelasLivres(expediente, nil)` devolve o expediente inteiro livre. A mesa
+// vazia não precisa de caso especial em lugar nenhum.
+func (r *PostgresRepo) BusyWindowsAll(ctx context.Context, from, to time.Time) (map[uuid.UUID][]Window, error) {
+	rows, err := r.db.Query(ctx, busyWindowsAllSQL, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("buscando janelas ocupadas do salão: %w", err)
+	}
+	defer rows.Close()
+
+	porMesa := map[uuid.UUID][]Window{}
+	for rows.Next() {
+		var id uuid.UUID
+		var w Window
+		if err := rows.Scan(&id, &w.StartsAt, &w.EndsAt); err != nil {
+			return nil, fmt.Errorf("lendo janela ocupada do salão: %w", err)
+		}
+		porMesa[id] = append(porMesa[id], w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("buscando janelas ocupadas do salão: %w", err)
+	}
+
+	return porMesa, nil
+}
+
 // Cancel é o soft delete: a linha fica, sai do índice parcial da EXCLUDE (que só
 // indexa status='confirmed') e libera o horário.
 //

@@ -1,5 +1,17 @@
 basePath: /
 definitions:
+  httpserver.ServiceHours:
+    properties:
+      end:
+        example: "23:00"
+        type: string
+      start:
+        example: "18:00"
+        type: string
+      tz:
+        example: America/Sao_Paulo
+        type: string
+    type: object
   httpx.ErrorResponse:
     properties:
       error:
@@ -42,6 +54,21 @@ definitions:
     x-enum-varnames:
     - StatusConfirmed
     - StatusCancelled
+  reservation.TableAvailability:
+    properties:
+      capacity:
+        example: 4
+        type: integer
+      free_windows:
+        items:
+          $ref: '#/definitions/reservation.Window'
+        type: array
+      table_id:
+        type: string
+      table_name:
+        example: Mesa 04
+        type: string
+    type: object
   reservation.Window:
     properties:
       ends_at:
@@ -123,6 +150,35 @@ info:
   title: API de Reservas de Restaurante
   version: "1.0"
 paths:
+  /availability:
+    get:
+      description: Devolve, para cada mesa ativa, as janelas livres no dia dentro
+        do horário de funcionamento. É a resposta para "quais mesas posso combinar
+        às 20h?" — o cliente filtra a grade por contenção de intervalo, sem refazer
+        o cálculo. Mesas inativas não aparecem.
+      parameters:
+      - description: Dia, AAAA-MM-DD, no fuso do restaurante
+        example: "2026-07-20"
+        in: query
+        name: date
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/reservation.TableAvailability'
+            type: array
+        "400":
+          description: date ausente ou malformado
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+      summary: Grade de disponibilidade do dia (todas as mesas)
+      tags:
+      - mesas
   /reservations:
     get:
       description: Filtros opcionais e combináveis. `date` é interpretado no fuso
@@ -245,6 +301,21 @@ paths:
       summary: Detalha uma reserva
       tags:
       - reservas
+  /service-hours:
+    get:
+      description: 'Horário de funcionamento e fuso usados por toda a API: a validação
+        de `starts_at` na criação de reserva e o cálculo das janelas livres. O frontend
+        lê daqui em vez de guardar uma cópia.'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpserver.ServiceHours'
+      summary: Expediente do restaurante
+      tags:
+      - restaurante
   /tables:
     get:
       description: Lista as mesas. Sem o parâmetro `active`, devolve todas — ativas

@@ -125,6 +125,28 @@ func TestRespostasBatemComOSwagger(t *testing.T) {
 			chama: (*Handler).Availability,
 		},
 		{
+			// A grade precisa vir com mesa PREENCHIDA: o exigirCamposExatos só
+			// morde no primeiro elemento do array. Uma grade vazia passaria por
+			// vazio, e o teste ficaria verde sem ter olhado o schema de
+			// TableAvailability — o mesmo falso verde que a Fase 3a descobriu.
+			nome: "GET /availability 200", metodo: http.MethodGet, rota: "/availability",
+			schedule: &fakeSchedule{gridFn: func(context.Context, string) ([]TableAvailability, error) {
+				return []TableAvailability{{
+					TableID:     mesaID,
+					TableName:   "Mesa 04",
+					Capacity:    4,
+					FreeWindows: []Window{jan(20, 18, 0, 20, 19, 0), jan(20, 21, 0, 20, 23, 0)},
+				}}, nil
+			}},
+			req:   httptest.NewRequest(http.MethodGet, "/availability?date=2026-07-20", nil),
+			chama: (*Handler).DayAvailability,
+		},
+		{
+			nome: "GET /availability 400 sem date", metodo: http.MethodGet, rota: "/availability",
+			req:   httptest.NewRequest(http.MethodGet, "/availability", nil),
+			chama: (*Handler).DayAvailability,
+		},
+		{
 			nome: "GET /tables/{id}/availability 400", metodo: http.MethodGet, rota: "/tables/{id}/availability",
 			req:   comPathValue(httptest.NewRequest(http.MethodGet, "/tables/"+mesaID.String()+"/availability", nil), mesaID),
 			chama: (*Handler).Availability,

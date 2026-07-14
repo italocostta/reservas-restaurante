@@ -9,6 +9,45 @@
     "host": "localhost:8080",
     "basePath": "/",
     "paths": {
+        "/availability": {
+            "get": {
+                "description": "Devolve, para cada mesa ativa, as janelas livres no dia dentro do horário de funcionamento. É a resposta para \"quais mesas posso combinar às 20h?\" — o cliente filtra a grade por contenção de intervalo, sem refazer o cálculo. Mesas inativas não aparecem.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mesas"
+                ],
+                "summary": "Grade de disponibilidade do dia (todas as mesas)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "example": "2026-07-20",
+                        "description": "Dia, AAAA-MM-DD, no fuso do restaurante",
+                        "name": "date",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/reservation.TableAvailability"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "date ausente ou malformado",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/reservations": {
             "get": {
                 "description": "Filtros opcionais e combináveis. `date` é interpretado no fuso do restaurante, não em UTC.",
@@ -178,6 +217,26 @@
                         "description": "Reserva não encontrada",
                         "schema": {
                             "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/service-hours": {
+            "get": {
+                "description": "Horário de funcionamento e fuso usados por toda a API: a validação de `starts_at` na criação de reserva e o cálculo das janelas livres. O frontend lê daqui em vez de guardar uma cópia.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "restaurante"
+                ],
+                "summary": "Expediente do restaurante",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpserver.ServiceHours"
                         }
                     }
                 }
@@ -409,6 +468,23 @@
         }
     },
     "definitions": {
+        "httpserver.ServiceHours": {
+            "type": "object",
+            "properties": {
+                "end": {
+                    "type": "string",
+                    "example": "23:00"
+                },
+                "start": {
+                    "type": "string",
+                    "example": "18:00"
+                },
+                "tz": {
+                    "type": "string",
+                    "example": "America/Sao_Paulo"
+                }
+            }
+        },
         "httpx.ErrorResponse": {
             "type": "object",
             "properties": {
@@ -471,6 +547,28 @@
                 "StatusConfirmed",
                 "StatusCancelled"
             ]
+        },
+        "reservation.TableAvailability": {
+            "type": "object",
+            "properties": {
+                "capacity": {
+                    "type": "integer",
+                    "example": 4
+                },
+                "free_windows": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/reservation.Window"
+                    }
+                },
+                "table_id": {
+                    "type": "string"
+                },
+                "table_name": {
+                    "type": "string",
+                    "example": "Mesa 04"
+                }
+            }
         },
         "reservation.Window": {
             "type": "object",

@@ -29,6 +29,7 @@ type repository interface {
 
 type schedule interface {
 	FreeWindows(ctx context.Context, tableID uuid.UUID, dia string) ([]Window, error)
+	DayGrid(ctx context.Context, dia string) ([]TableAvailability, error)
 }
 
 type Handler struct {
@@ -280,4 +281,34 @@ func (h *Handler) Availability(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.JSON(w, http.StatusOK, janelas)
+}
+
+// DayAvailability godoc
+//
+//	@Summary		Grade de disponibilidade do dia (todas as mesas)
+//	@Description	Devolve, para cada mesa ativa, as janelas livres no dia dentro do horário de funcionamento. É a resposta para "quais mesas posso combinar às 20h?" — o cliente filtra a grade por contenção de intervalo, sem refazer o cálculo. Mesas inativas não aparecem.
+//	@Tags			mesas
+//	@Produce		json
+//	@Param			date	query		string	true	"Dia, AAAA-MM-DD, no fuso do restaurante"	example(2026-07-20)
+//	@Success		200		{array}		TableAvailability
+//	@Failure		400		{object}	httpx.ErrorResponse	"date ausente ou malformado"
+//	@Router			/availability [get]
+func (h *Handler) DayAvailability(w http.ResponseWriter, r *http.Request) {
+	// Mesma obrigatoriedade do Availability, pela mesma razão: "janelas livres"
+	// sem dia é pergunta sem resposta, não pergunta sem filtro. O formato em si
+	// quem valida é o expedienteDe, no domínio — o handler não duplica o
+	// time.Parse só para chegar à mesma conclusão.
+	dia := r.URL.Query().Get("date")
+	if dia == "" {
+		httpx.Error(w, http.StatusBadRequest, "Parâmetro 'date' é obrigatório (AAAA-MM-DD).")
+		return
+	}
+
+	grade, err := h.schedule.DayGrid(r.Context(), dia)
+	if err != nil {
+		responder(w, r, err, "consultando a grade do dia")
+		return
+	}
+
+	httpx.JSON(w, http.StatusOK, grade)
 }

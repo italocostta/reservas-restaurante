@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"reservas-restaurante/internal/notification"
 	"reservas-restaurante/internal/table"
 )
 
@@ -124,8 +125,26 @@ INSERT INTO reservations
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, status, created_at`
 
+// Insert grava a reserva E o evento de notificação na MESMA transação. É o
+// primeiro caso multi-statement do projeto — e o que finalmente justifica a
+// "transação básica" que a terceira rodada de revisão da spec tinha removido do
+// objetivo da Fase 1a, por não existir caso real que a pedisse.
+//
+// Sem a transação, os dois COMMIT seriam independentes: o processo morre entre
+// eles e você fica ou com reserva sem notificação, ou — pior — com notificação
+// de uma reserva que não existe.
 func (r *PostgresRepo) Insert(ctx context.Context, res Reservation) (Reservation, error) {
-	err := r.db.QueryRow(ctx, insertSQL,
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return Reservation{}, fmt.Errorf("abrindo transação: %w", err)
+	}
+	// Rollback incondicional no defer. Depois de um Commit bem-sucedido ele vira
+	// no-op (devolve pgx.ErrTxClosed, que ignoramos de propósito). É o idioma de
+	// Go para garantir que NENHUM caminho de saída — inclusive um panic — deixe
+	// a transação aberta segurando locks até o timeout do servidor.
+	defer tx.Rollback(ctx)
+
+	err = tx.QueryRow(ctx, insertSQL,
 		res.TableID,
 		res.CustomerName,
 		res.CustomerPhone,
@@ -136,6 +155,7 @@ func (r *PostgresRepo) Insert(ctx context.Context, res Reservation) (Reservation
 
 	// A fronteira da Fase 1c: aqui o erro do driver vira erro de domínio, e o
 	// allocator lá em cima decide o que fazer com ele sem nunca ver um pgconn.
+	// O defer acima desfaz a transação abortada pelo 23P01.
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == pgCodeExclusionViolation {
 		return Reservation{}, ErrSlotTaken
@@ -144,7 +164,25 @@ func (r *PostgresRepo) Insert(ctx context.Context, res Reservation) (Reservation
 		return Reservation{}, fmt.Errorf("inserindo reserva: %w", err)
 	}
 
+	if err := notification.Enqueue(ctx, tx, res.ID, notification.KindConfirmed, payloadDe(res)); err != nil {
+		return Reservation{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Reservation{}, fmt.Errorf("confirmando reserva: %w", err)
+	}
+
 	return res, nil
+}
+
+func payloadDe(res Reservation) notification.Payload {
+	return notification.Payload{
+		CustomerName:  res.CustomerName,
+		CustomerPhone: res.CustomerPhone,
+		PartySize:     res.PartySize,
+		StartsAt:      res.StartsAt,
+		EndsAt:        res.EndsAt,
+	}
 }
 
 const colunas = `id, table_id, customer_name, customer_phone,
@@ -253,25 +291,72 @@ func (r *PostgresRepo) BusyWindows(ctx context.Context, tableID uuid.UUID, from,
 	return ocupadas, nil
 }
 
-// Cancel é o soft delete: a linha fica, sai do índice parcial da EXCLUDE (que
-// só indexa status='confirmed') e libera o horário. É idempotente — cancelar
-// duas vezes devolve sucesso, porque o resultado desejado já é o vigente.
+// Cancel é o soft delete: a linha fica, sai do índice parcial da EXCLUDE (que só
+// indexa status='confirmed') e libera o horário.
+//
+// O `AND status = 'confirmed'` não é só um guarda — é um COMPARE-AND-SWAP. Sob
+// dois cancelamentos concorrentes, o Postgres serializa pelo lock da linha: o
+// segundo UPDATE espera, reavalia o WHERE depois do commit do primeiro, vê que o
+// status já não é 'confirmed', e afeta ZERO linhas. Exatamente uma notificação é
+// enfileirada, sem lock explícito e sem retry.
+//
+// Sem essa cláusula, o endpoint continuaria idempotente (204 nas duas vezes) mas
+// o EFEITO COLATERAL não: o cliente receberia dois SMS de cancelamento.
+// Idempotência do endpoint não é idempotência do efeito colateral.
 const cancelSQL = `
 UPDATE reservations
 SET status = 'cancelled'
-WHERE id = $1
-RETURNING id`
+WHERE id = $1 AND status = 'confirmed'
+RETURNING id, customer_name, customer_phone, party_size, starts_at, ends_at`
+
+const statusDaReservaSQL = `SELECT status FROM reservations WHERE id = $1`
 
 func (r *PostgresRepo) Cancel(ctx context.Context, id uuid.UUID) error {
-	var cancelada uuid.UUID
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("abrindo transação: %w", err)
+	}
+	defer tx.Rollback(ctx)
 
-	err := r.db.QueryRow(ctx, cancelSQL, id).Scan(&cancelada)
+	var res Reservation
+	err = tx.QueryRow(ctx, cancelSQL, id).Scan(
+		&res.ID, &res.CustomerName, &res.CustomerPhone,
+		&res.PartySize, &res.StartsAt, &res.EndsAt,
+	)
+
+	// Zero linhas afetadas. Duas causas possíveis, com respostas HTTP diferentes.
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
+		return r.explicarSemMudanca(ctx, tx, id)
 	}
 	if err != nil {
 		return fmt.Errorf("cancelando reserva %s: %w", id, err)
 	}
 
+	if err := notification.Enqueue(ctx, tx, res.ID, notification.KindCancelled, payloadDe(res)); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("confirmando cancelamento de %s: %w", id, err)
+	}
+
+	return nil
+}
+
+// explicarSemMudanca separa "a reserva não existe" (→ 404) de "já estava
+// cancelada" (→ 204, idempotente e SEM nova notificação).
+func (r *PostgresRepo) explicarSemMudanca(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+	var status Status
+
+	err := tx.QueryRow(ctx, statusDaReservaSQL, id).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("verificando reserva %s: %w", id, err)
+	}
+
+	// Já cancelada: sucesso, sem efeito. Não há o que commitar — o defer
+	// desfaz a transação vazia.
 	return nil
 }

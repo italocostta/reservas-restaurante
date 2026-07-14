@@ -1,0 +1,26 @@
+{
+  "extends": "@vue/tsconfig/tsconfig.dom.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "types": ["vite/client"],
+    "allowArbitraryExtensions": true,
+
+    /* O alias @ → src/. Precisa existir em DOIS lugares: aqui (para o TypeScript
+       resolver o TIPO) e no vite.config.ts (para o bundler resolver o MÓDULO).
+       Configurar só um dos dois deixa metade das ferramentas cega.
+
+       Sem `baseUrl`: ele está deprecado no TS 6 e some no 7. Desde o TS 5.4 o
+       `paths` resolve relativo a ESTE arquivo, que é o que se quer de qualquer
+       forma. */
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"]
+}

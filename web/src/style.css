@@ -1,0 +1,93 @@
+@import 'tailwindcss';
+
+/*
+  DIREÇÃO: quadro de serviço de cozinha.
+
+  Esta tela não é um portfólio — é uma ferramenta que o staff olha DURANTE o
+  serviço, com telefone no ombro e fila na porta. Toda decisão abaixo responde a
+  isso:
+
+  - Escuro e QUENTE (não azulado): o salão é escuro e a tela fica no passe. Um
+    fundo #0F172A — o slate-900 de todo dashboard — seria frio e genérico.
+  - Contraste alto, densidade controlada: leitura rápida, de relance, em ângulo.
+  - Mono para DADO (capacidade, horário, id); condensada para RÓTULO. O olho
+    encontra o número sem ler a linha inteira.
+  - Movimento só onde carrega informação. Cada 200ms de animação é 200ms que o
+    cliente espera na linha — aqui, animação é SINAL, não enfeite.
+*/
+@theme {
+  /* IBM Plex: industrial de propósito, desenhada para leitura densa, e com
+     caráter de verdade (os terminais chanfrados). Não é Inter, não é Roboto. */
+  --font-display: 'IBM Plex Sans Condensed', ui-sans-serif, sans-serif;
+  --font-body: 'IBM Plex Sans', ui-sans-serif, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* Carvão quente — o preto de uma chapa, não o de um terminal. */
+  --color-ink-950: #0e0c0a;
+  --color-ink-900: #14110e;
+  --color-ink-850: #1a1613;
+  --color-ink-800: #221d18;
+  --color-ink-700: #2e2721;
+  --color-ink-600: #443a31;
+  --color-ink-500: #6b5e52;
+  --color-ink-400: #8f8175;
+  --color-ink-300: #a99c90;
+  --color-ink-200: #c4b8ac;
+  --color-ink-100: #e9e2d9;
+
+  /* Brasa. O acento é UM só, reservado para ação e foco — se tudo for laranja,
+     nada é. */
+  --color-ember-300: #ffa45c;
+  --color-ember-400: #ff8534;
+  --color-ember-500: #f2691b;
+  --color-ember-600: #d4530c;
+
+  /* Sinais de estado. Dessaturados de propósito: informam, não competem com a
+     brasa. */
+  --color-sage-500: #7a9e6b;
+  --color-sage-300: #a3c294;
+  --color-blood-500: #d93a3a;
+  --color-blood-300: #f08585;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    background-color: var(--color-ink-950);
+  }
+
+  body {
+    @apply bg-ink-950 text-ink-100 font-body antialiased;
+    /* Grão. Papel de comanda tem textura; tela lisa não tem nenhuma. É sutil de
+       propósito — se você VER o ruído, ele está errado. */
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+  }
+
+  /* Foco laranja e grosso. Este sistema vai ser operado no teclado por gente com
+     pressa: o anel de foco não é acessibilidade cerimonial, é COMO a pessoa sabe
+     onde está. */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-ember-500;
+  }
+
+  ::selection {
+    @apply bg-ember-500 text-ink-950;
+  }
+}
+
+@layer components {
+  /* Rótulo de comanda: caixa alta, apertado, pequeno. É o que separa um "quadro"
+     de um "formulário". */
+  .rotulo {
+    @apply font-display text-[0.6875rem] font-semibold tracking-[0.14em] text-ink-400 uppercase;
+  }
+
+  /* Todo DADO é mono e tabular: colunas de números alinham sozinhas, e é por isso
+     que o olho acha a capacidade sem ler a linha. */
+  .dado {
+    @apply font-mono tabular-nums;
+  }
+}

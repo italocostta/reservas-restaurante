@@ -1,0 +1,11 @@
+# Segredos: DATABASE_URL contém a senha do Postgres.
+.env
+
+# Binários compilados
+*.exe
+/api
+/reservas-restaurante
+
+# Corpos de requisição usados em testes manuais com curl
+mesa.json
+patch.json

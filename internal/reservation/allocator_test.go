@@ -60,6 +60,27 @@ func (c *fakeCreator) Insert(ctx context.Context, r Reservation) (Reservation, e
 	return c.insertFn(ctx, r)
 }
 
+type fakeReplacer struct {
+	replaceFn func(ctx context.Context, oldID uuid.UUID, novo Reservation) (Reservation, error)
+	calls     int
+	ultimoOld uuid.UUID
+}
+
+func (r *fakeReplacer) Replace(ctx context.Context, oldID uuid.UUID, novo Reservation) (Reservation, error) {
+	r.calls++
+	r.ultimoOld = oldID
+	return r.replaceFn(ctx, oldID, novo)
+}
+
+// replacerProibido falha o teste se for chamado. Os testes de CRIAÇÃO não editam;
+// se o Replace for tocado num deles, é bug — e é melhor descobrir com um panic no
+// teste do que com um comportamento silencioso.
+type replacerProibido struct{}
+
+func (replacerProibido) Replace(context.Context, uuid.UUID, Reservation) (Reservation, error) {
+	panic("Replace não deveria ser chamado num teste de criação")
+}
+
 type fakeClock struct{ agora time.Time }
 
 func (c fakeClock) Now() time.Time { return c.agora }
@@ -86,7 +107,13 @@ var (
 )
 
 func novoAllocator(f *fakeFinder, c *fakeCreator) *Allocator {
-	return NewAllocator(f, c, ServiceHours{
+	return comReplacer(f, c, replacerProibido{})
+}
+
+// comReplacer monta um Allocator com um replacer explícito, para os testes de
+// edição. Os de criação usam novoAllocator, que injeta o replacerProibido.
+func comReplacer(f *fakeFinder, c *fakeCreator, r ReservationReplacer) *Allocator {
+	return NewAllocator(f, c, r, ServiceHours{
 		Start: 18 * time.Hour,
 		End:   23 * time.Hour,
 		TZ:    fusoSP,
@@ -454,6 +481,130 @@ func TestAutomaticoEsgotaOsRetries(t *testing.T) {
 	// O INVARIANTE: ErrSlotTaken é sinal interno e nunca pode chegar ao handler.
 	if errors.Is(err, ErrSlotTaken) {
 		t.Error("ErrSlotTaken vazou do allocator — o handler não deve conhecer esse erro")
+	}
+}
+
+// ---------- edição: UpdateReservation ----------
+
+// A edição herda a alocação da criação — só troca Insert por Replace. Este teste
+// prova que o caminho MANUAL passa pelo Replace com o id antigo, e não pelo Insert.
+func TestUpdateManualUsaReplaceComOIdAntigo(t *testing.T) {
+	m := mesa("Mesa A", 4)
+	antiga := uuid.New()
+
+	finder := &fakeFinder{getFn: devolve(m)}
+	creator := &fakeCreator{insertFn: func(context.Context, Reservation) (Reservation, error) {
+		panic("Insert não deve ser chamado numa edição")
+	}}
+
+	var recebida Reservation
+	repl := &fakeReplacer{replaceFn: func(_ context.Context, _ uuid.UUID, novo Reservation) (Reservation, error) {
+		recebida = novo
+		novo.ID = uuid.New() // Replace devolve uma reserva com id NOVO
+		return novo, nil
+	}}
+
+	req := pedido()
+	req.PreferredTableIDs = []uuid.UUID{m.ID}
+
+	res, err := comReplacer(finder, creator, repl).UpdateReservation(context.Background(), antiga, req)
+	if err != nil {
+		t.Fatalf("erro = %v, quero sucesso", err)
+	}
+	if repl.calls != 1 {
+		t.Fatalf("Replace chamado %d vezes, quero 1", repl.calls)
+	}
+	if repl.ultimoOld != antiga {
+		t.Errorf("Replace recebeu oldID %s, quero %s", repl.ultimoOld, antiga)
+	}
+	if recebida.TableIDs[0] != m.ID {
+		t.Error("a reserva nova deveria manter a mesa pedida")
+	}
+	if res.ID == antiga {
+		t.Error("a reserva editada deve ter id NOVO — editar é remarcar, não mutar a linha")
+	}
+}
+
+// A edição no caminho MANUAL, ao colidir, devolve ErrTableUnavailable — igual à
+// criação. Sem retry: a mesma mesa colidiria de novo.
+func TestUpdateManualColideViraTableUnavailable(t *testing.T) {
+	m := mesa("Mesa A", 4)
+	finder := &fakeFinder{getFn: devolve(m)}
+
+	repl := &fakeReplacer{replaceFn: func(context.Context, uuid.UUID, Reservation) (Reservation, error) {
+		return Reservation{}, ErrSlotTaken
+	}}
+
+	req := pedido()
+	req.PreferredTableIDs = []uuid.UUID{m.ID}
+
+	_, err := comReplacer(finder, &fakeCreator{}, repl).UpdateReservation(context.Background(), uuid.New(), req)
+
+	if !errors.Is(err, ErrTableUnavailable) {
+		t.Fatalf("erro = %v, quero ErrTableUnavailable", err)
+	}
+	if errors.Is(err, ErrSlotTaken) {
+		t.Error("ErrSlotTaken vazou — o handler não deve conhecer esse erro")
+	}
+	if repl.calls != 1 {
+		t.Errorf("Replace chamado %d vezes, quero 1 — manual não retenta", repl.calls)
+	}
+}
+
+// A edição no caminho AUTOMÁTICO retenta, exatamente como a criação: o Replace
+// falha na primeira mesa (tomada) e a reconsulta acha outra. Prova que o retry
+// envolve a transação inteira do Replace, não só o Insert.
+func TestUpdateAutomaticoRetentaNaReconsulta(t *testing.T) {
+	tomada := mesa("Mesa A", 4)
+	livre := mesa("Mesa B", 8)
+
+	finder := &fakeFinder{}
+	finder.findFn = func(context.Context, int, time.Time, time.Time) ([]table.Table, error) {
+		if finder.findCalls == 1 {
+			return []table.Table{tomada, livre}, nil
+		}
+		return []table.Table{livre}, nil
+	}
+
+	var reservada uuid.UUID
+	repl := &fakeReplacer{replaceFn: func(_ context.Context, _ uuid.UUID, novo Reservation) (Reservation, error) {
+		if novo.TableIDs[0] == tomada.ID {
+			return Reservation{}, ErrSlotTaken // rollback restaura a antiga; retry
+		}
+		reservada = novo.TableIDs[0]
+		return novo, nil
+	}}
+
+	// PreferredTableIDs vazio → caminho automático.
+	_, err := comReplacer(finder, &fakeCreator{}, repl).UpdateReservation(context.Background(), uuid.New(), pedido())
+	if err != nil {
+		t.Fatalf("erro = %v, quero sucesso na segunda tentativa", err)
+	}
+	if reservada != livre.ID {
+		t.Error("deveria ter remarcado para a Mesa B na reconsulta")
+	}
+	if finder.findCalls != 2 || repl.calls != 2 {
+		t.Errorf("find=%d replace=%d, quero 2 e 2", finder.findCalls, repl.calls)
+	}
+}
+
+// Validação continua valendo na edição: um pedido inválido nem chega ao Replace.
+func TestUpdateValidaAntesDeTocarNoRepo(t *testing.T) {
+	repl := &fakeReplacer{replaceFn: func(context.Context, uuid.UUID, Reservation) (Reservation, error) {
+		panic("Replace não deve ser chamado com pedido inválido")
+	}}
+
+	req := pedido()
+	req.PartySize = 0 // inválido
+
+	_, err := comReplacer(&fakeFinder{}, &fakeCreator{}, repl).UpdateReservation(context.Background(), uuid.New(), req)
+
+	var ve ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("erro = %v, quero ValidationError", err)
+	}
+	if repl.calls != 0 {
+		t.Error("Replace foi chamado apesar do pedido inválido")
 	}
 }
 

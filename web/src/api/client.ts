@@ -162,6 +162,13 @@ export const api = {
     create: (input: CreateReservationInput) =>
       request<Reservation>('POST', '/reservations', input),
 
+    /**
+     * Edita (remarca): cancela a reserva atual e cria uma nova, no servidor, numa
+     * transação só. A Reservation devolvida tem ID NOVO — editar não muta a linha.
+     */
+    update: (id: UUID, input: CreateReservationInput) =>
+      request<Reservation>('PATCH', `/reservations/${id}`, input),
+
     /** 204, sem corpo. Idempotente: cancelar duas vezes devolve 204 nas duas. */
     cancel: (id: UUID) => request<void>('DELETE', `/reservations/${id}`),
   },

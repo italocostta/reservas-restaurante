@@ -199,7 +199,29 @@ func (r *PostgresRepo) Insert(ctx context.Context, res Reservation) (Reservation
 	// a transação aberta segurando locks até o timeout do servidor.
 	defer tx.Rollback(ctx)
 
-	err = tx.QueryRow(ctx, insertSQL,
+	res, err = inserirNaTx(ctx, tx, res)
+	if err != nil {
+		return Reservation{}, err
+	}
+
+	if err := notification.Enqueue(ctx, tx, res.ID, notification.KindConfirmed, payloadDe(res)); err != nil {
+		return Reservation{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Reservation{}, fmt.Errorf("confirmando reserva: %w", err)
+	}
+
+	return res, nil
+}
+
+// inserirNaTx é o núcleo compartilhado por Insert e Replace: grava a reserva e as
+// linhas de junção numa transação JÁ ABERTA, traduzindo 23P01 em ErrSlotTaken. Não
+// commita nem enfileira notificação — isso é decisão de quem chama, e é o que
+// difere uma criação (uma notificação de confirmação) de uma edição (cancela a
+// antiga e emite uma de alteração).
+func inserirNaTx(ctx context.Context, tx pgx.Tx, res Reservation) (Reservation, error) {
+	err := tx.QueryRow(ctx, insertSQL,
 		res.CustomerName,
 		res.CustomerPhone,
 		res.PartySize,
@@ -225,15 +247,63 @@ func (r *PostgresRepo) Insert(ctx context.Context, res Reservation) (Reservation
 		return Reservation{}, fmt.Errorf("associando mesas à reserva: %w", err)
 	}
 
-	if err := notification.Enqueue(ctx, tx, res.ID, notification.KindConfirmed, payloadDe(res)); err != nil {
+	return res, nil
+}
+
+// cancelarLinhaSQL derruba a reserva antiga DENTRO da transação da edição. O
+// `AND status = 'confirmed'` é o mesmo compare-and-swap do Cancel: se a linha não
+// existe ou já está cancelada, afeta zero linhas — e Replace trata isso como "não
+// há o que editar".
+const cancelarLinhaSQL = `
+UPDATE reservations
+SET status = 'cancelled'
+WHERE id = $1 AND status = 'confirmed'`
+
+// Replace é a edição atômica: cancela a reserva antiga e cria a nova na MESMA
+// transação, com UMA notificação de alteração. É o que dá a semântica que um
+// PATCH de reserva precisa sem um UPDATE in-place — que seria impossível, porque
+// mudar horário/mesa/tamanho pode exigir realocar, e a EXCLUDE recusaria a reserva
+// contra ela mesma.
+//
+// A ORDEM é o que faz funcionar: cancela PRIMEIRO (a linha sai do índice parcial
+// da EXCLUDE, que só indexa 'confirmed'), depois insere. Editar só o nome, na
+// mesma mesa e horário, não colide com a própria reserva.
+//
+// E o rollback é a rede: se a inserção falhar (ErrSlotTaken), o defer desfaz TUDO
+// — inclusive o cancelamento. Nunca existe um instante observável em que o cliente
+// fique sem reserva. Isso também torna o retry do allocator seguro: cada tentativa
+// é uma transação inteira que ou troca a reserva, ou não mexe em nada.
+func (r *PostgresRepo) Replace(ctx context.Context, oldID uuid.UUID, novo Reservation) (Reservation, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return Reservation{}, fmt.Errorf("abrindo transação: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	ct, err := tx.Exec(ctx, cancelarLinhaSQL, oldID)
+	if err != nil {
+		return Reservation{}, fmt.Errorf("cancelando reserva %s para editar: %w", oldID, err)
+	}
+	// Zero linhas: não existe, ou já estava cancelada. Nos dois casos não há
+	// reserva confirmada para editar. ErrNotFound vira 404 no handler.
+	if ct.RowsAffected() == 0 {
+		return Reservation{}, ErrNotFound
+	}
+
+	novo, err = inserirNaTx(ctx, tx, novo)
+	if err != nil {
+		return Reservation{}, err // ErrSlotTaken sobe; o rollback restaura a antiga
+	}
+
+	if err := notification.Enqueue(ctx, tx, novo.ID, notification.KindUpdated, payloadDe(novo)); err != nil {
 		return Reservation{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return Reservation{}, fmt.Errorf("confirmando reserva: %w", err)
+		return Reservation{}, fmt.Errorf("confirmando edição da reserva: %w", err)
 	}
 
-	return res, nil
+	return novo, nil
 }
 
 func payloadDe(res Reservation) notification.Payload {

@@ -94,7 +94,11 @@ func run() error {
 		TZ:    cfg.ServiceTZ,
 	}
 
+	// reservationRepo entra três vezes: TableFinder + ReservationCreator +
+	// ReservationReplacer. A mesma struct, três interfaces pequenas declaradas
+	// pelo allocator. Ele não sabe que é o mesmo objeto — nem precisa.
 	allocator := reservation.NewAllocator(
+		reservationRepo,
 		reservationRepo,
 		reservationRepo,
 		hours,

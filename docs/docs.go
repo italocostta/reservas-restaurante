@@ -226,6 +226,63 @@ const docTemplate = `{
                         }
                     }
                 }
+            },
+            "patch": {
+                "description": "Cancela a reserva atual e cria uma nova com os dados enviados, numa transação só. A reserva devolvida tem **id novo** — editar é remarcar, não mutar a linha. O corpo é o mesmo do POST: ` + "`" + `table_ids` + "`" + ` vazio realoca automaticamente, com uma ou mais mesas usa exatamente essas. Se a nova alocação colidir, nada muda: a reserva original permanece.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "reservas"
+                ],
+                "summary": "Edita (remarca) uma reserva",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "ID da reserva a editar (UUID)",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Novos dados da reserva",
+                        "name": "reserva",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/reservation.createRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/reservation.Reservation"
+                        }
+                    },
+                    "400": {
+                        "description": "Dados inválidos, fora do expediente, mesa inativa/inexistente/repetida, ou grupo maior que a capacidade",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Reserva não encontrada ou já cancelada",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Mesa(s) pedida(s) ocupada(s), ou nenhuma mesa disponível no horário",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
             }
         },
         "/service-hours": {

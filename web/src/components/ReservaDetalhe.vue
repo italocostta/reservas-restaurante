@@ -13,7 +13,7 @@ const props = defineProps<{
   tz: string
 }>()
 
-const emit = defineEmits<{ fechar: [] }>()
+const emit = defineEmits<{ fechar: []; editar: [reserva: Reservation] }>()
 
 const agenda = useAgendaStore()
 
@@ -119,13 +119,22 @@ async function cancelar() {
           >
             Cancelar reserva
           </button>
-          <button
-            type="button"
-            class="font-display text-ink-300 hover:text-ink-100 px-4 py-2 text-sm font-semibold tracking-wide uppercase"
-            @click="emit('fechar')"
-          >
-            Fechar
-          </button>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              class="font-display text-ink-300 hover:text-ink-100 px-4 py-2 text-sm font-semibold tracking-wide uppercase"
+              @click="emit('fechar')"
+            >
+              Fechar
+            </button>
+            <button
+              type="button"
+              class="font-display bg-ember-500 text-ink-950 hover:bg-ember-400 px-4 py-2 text-sm font-bold tracking-wide uppercase transition-colors"
+              @click="reserva && emit('editar', reserva)"
+            >
+              Editar
+            </button>
+          </div>
         </template>
 
         <template v-else>

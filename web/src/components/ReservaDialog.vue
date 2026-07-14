@@ -4,9 +4,9 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { mensagemLegivel } from '@/api/errors'
 import { livreEm, maiorCapacidade, sugerirCombinacao } from '@/lib/grade'
 import { formatarTelefone, soDigitos } from '@/lib/telefone'
-import { hhmmParaMinutos, instanteDe, minutosParaHHMM } from '@/lib/tempo'
+import { hhmmParaMinutos, horaLocal, instanteDe, minutosParaHHMM } from '@/lib/tempo'
 import { useAgendaStore } from '@/stores/agenda'
-import type { DateOnly, TableAvailability, UUID } from '@/types/api'
+import type { DateOnly, Reservation, TableAvailability, UUID } from '@/types/api'
 
 const props = defineProps<{
   aberto: boolean
@@ -16,7 +16,11 @@ const props = defineProps<{
   /** Pré-seleção vinda do clique na grade. */
   mesaPre: TableAvailability | null
   minutosPre: number | null
+  /** Quando presente, o dialog está EDITANDO essa reserva, não criando uma. */
+  reservaPre: Reservation | null
 }>()
+
+const editando = computed(() => props.reservaPre !== null)
 
 const emit = defineEmits<{ fechar: []; salvo: [] }>()
 
@@ -156,28 +160,44 @@ watch(
       return
     }
 
-    nome.value = ''
-    telefone.value = ''
-    pessoas.value = null
-    inicio.value = '19:00'
-    // Volta a vazio: cada abertura recomeça com a saída no default (#4).
-    fim.value = ''
     erro.value = null
 
-    // Veio de um clique na grade: a mesa e a hora já vêm preenchidas, e o modo já
-    // entra em manual — quem clicou NAQUELA mesa escolheu aquela mesa.
-    if (props.mesaPre) {
+    if (props.reservaPre) {
+      // EDIÇÃO: pré-preenche tudo com a reserva atual. Entra em modo manual com as
+      // mesas que ela já ocupa marcadas — editar mostra onde a reserva está, e o
+      // staff muda a partir daí. A saída vem EXPLÍCITA (não o default de +2h): numa
+      // edição, esconder o horário de saída seria esconder um dado que já existe.
+      const r = props.reservaPre
+      nome.value = r.customer_name
+      telefone.value = soDigitos(r.customer_phone)
+      pessoas.value = r.party_size
+      inicio.value = horaLocal(r.starts_at, props.tz)
+      fim.value = horaLocal(r.ends_at, props.tz)
       modo.value = 'manual'
-      selecionadas.value = [props.mesaPre.table_id]
+      selecionadas.value = [...r.table_ids]
     } else {
-      modo.value = 'auto'
-      selecionadas.value = []
-    }
+      // CRIAÇÃO.
+      nome.value = ''
+      telefone.value = ''
+      pessoas.value = null
+      inicio.value = '19:00'
+      fim.value = '' // saída no default (#4)
 
-    // A hora do clique preenche só o INÍCIO. A saída fica no default de +2h — o
-    // clique diz "reservar aqui", não "reservar por exatamente duas horas".
-    if (props.minutosPre !== null) {
-      inicio.value = minutosParaHHMM(props.minutosPre % 1440)
+      // Veio de um clique na grade: a mesa e a hora já vêm preenchidas, e o modo
+      // já entra em manual — quem clicou NAQUELA mesa escolheu aquela mesa.
+      if (props.mesaPre) {
+        modo.value = 'manual'
+        selecionadas.value = [props.mesaPre.table_id]
+      } else {
+        modo.value = 'auto'
+        selecionadas.value = []
+      }
+
+      // A hora do clique preenche só o INÍCIO. A saída fica no default de +2h — o
+      // clique diz "reservar aqui", não "reservar por exatamente duas horas".
+      if (props.minutosPre !== null) {
+        inicio.value = minutosParaHHMM(props.minutosPre % 1440)
+      }
     }
 
     dialogo.value?.showModal()
@@ -215,17 +235,25 @@ async function salvar() {
   salvando.value = true
   erro.value = null
 
+  const dados = {
+    // Omitido no automático: `undefined` some do JSON.stringify, e o Go lê um
+    // slice nil — que é exatamente "escolha a mesa por mim".
+    table_ids: modo.value === 'manual' ? [...selecionadas.value] : undefined,
+    customer_name: nomeLimpo,
+    customer_phone: telefone.value.trim(),
+    party_size: pessoas.value,
+    starts_at: instanteInicio.value,
+    ends_at: instanteFimReal.value,
+  }
+
   try {
-    await agenda.criar({
-      // Omitido no automático: `undefined` some do JSON.stringify, e o Go lê um
-      // slice nil — que é exatamente "escolha a mesa por mim".
-      table_ids: modo.value === 'manual' ? [...selecionadas.value] : undefined,
-      customer_name: nomeLimpo,
-      customer_phone: telefone.value.trim(),
-      party_size: pessoas.value,
-      starts_at: instanteInicio.value,
-      ends_at: instanteFimReal.value,
-    })
+    // Editar e criar chamam funções diferentes do store, mas o corpo é idêntico —
+    // o backend trata a edição como "remarcar" (cancela a antiga, cria a nova).
+    if (editando.value) {
+      await agenda.editar(props.reservaPre!.id, dados)
+    } else {
+      await agenda.criar(dados)
+    }
 
     emit('salvo')
     emit('fechar')
@@ -250,7 +278,13 @@ async function salvar() {
       <div class="bg-ember-500 h-1"></div>
 
       <header class="border-ink-700 border-b px-6 pt-5 pb-4">
-        <h2 class="font-display text-lg font-bold tracking-wide uppercase">Nova reserva</h2>
+        <h2 class="font-display text-lg font-bold tracking-wide uppercase">
+          {{ editando ? 'Editar reserva' : 'Nova reserva' }}
+        </h2>
+        <p v-if="editando" class="text-ink-500 mt-1 text-xs">
+          Salvar remarca a reserva: a atual é cancelada e uma nova é criada com estes
+          dados.
+        </p>
       </header>
 
       <div class="max-h-[65vh] space-y-5 overflow-y-auto px-6 py-6">
@@ -468,7 +502,7 @@ async function salvar() {
           :disabled="salvando || bloqueiaAuto"
           class="font-display bg-ember-500 text-ink-950 hover:bg-ember-400 px-5 py-2 text-sm font-bold tracking-wide uppercase transition-colors disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {{ salvando ? 'Reservando…' : 'Reservar' }}
+          {{ salvando ? 'Salvando…' : editando ? 'Salvar alterações' : 'Reservar' }}
         </button>
       </footer>
     </form>

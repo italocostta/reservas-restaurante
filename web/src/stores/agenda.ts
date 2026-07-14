@@ -102,6 +102,21 @@ export const useAgendaStore = defineStore('agenda', () => {
   }
 
   /**
+   * Edita e recarrega. O backend cancela a antiga e cria a nova numa transação só,
+   * então a resposta tem id novo — mas a grade é recarregada inteira de qualquer
+   * forma, pela mesma razão do criar: a edição mexe nas janelas livres de várias
+   * mesas (a antiga liberou, a nova ocupou), e essas janelas são calculadas pelo
+   * servidor.
+   *
+   * LANÇA em 400/404/409, como o criar — o erro é do formulário de edição.
+   */
+  async function editar(id: UUID, input: CreateReservationInput): Promise<Reservation> {
+    const nova = await api.reservations.update(id, input)
+    await carregar()
+    return nova
+  }
+
+  /**
    * Cancela e recarrega, pelo mesmo motivo: o cancelamento LIBERA o horário (soft
    * delete → sai do índice parcial da EXCLUDE), e a janela livre que reabriu foi
    * calculada pelo servidor.
@@ -122,6 +137,7 @@ export const useAgendaStore = defineStore('agenda', () => {
     totalCobertos,
     carregar,
     criar,
+    editar,
     cancelar,
   }
 })

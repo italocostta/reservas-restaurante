@@ -43,6 +43,7 @@ func New(cfg config.Config, tables *table.Handler, reservations *reservation.Han
 	mux.HandleFunc("POST /reservations", reservations.Create)
 	mux.HandleFunc("GET /reservations", reservations.List)
 	mux.HandleFunc("GET /reservations/{id}", reservations.Get)
+	mux.HandleFunc("PATCH /reservations/{id}", reservations.Update)
 	mux.HandleFunc("DELETE /reservations/{id}", reservations.Delete)
 
 	// O expediente é a única parte da config que sai pela API: o frontend precisa

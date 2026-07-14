@@ -141,7 +141,7 @@ func TestConcorrenciaCaminhoAutomatico(t *testing.T) {
 	tableID := mesaDeTeste(t, pool)
 
 	repo := NewPostgresRepo(pool, fusoSP)
-	alloc := NewAllocator(repo, repo, horasDeTeste(), SystemClock{})
+	alloc := NewAllocator(repo, repo, repo, horasDeTeste(), SystemClock{})
 	inicio, fim := janelaFutura()
 
 	const n = 10
@@ -171,7 +171,7 @@ func TestConcorrenciaCaminhoManual(t *testing.T) {
 	tableID := mesaDeTeste(t, pool)
 
 	repo := NewPostgresRepo(pool, fusoSP)
-	alloc := NewAllocator(repo, repo, horasDeTeste(), SystemClock{})
+	alloc := NewAllocator(repo, repo, repo, horasDeTeste(), SystemClock{})
 	inicio, fim := janelaFutura()
 
 	const n = 10

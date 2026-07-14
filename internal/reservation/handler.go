@@ -19,6 +19,7 @@ import (
 // e nenhum dos dois precisou declarar nada.
 type allocator interface {
 	CreateReservation(ctx context.Context, req AllocationRequest) (Reservation, error)
+	UpdateReservation(ctx context.Context, oldID uuid.UUID, req AllocationRequest) (Reservation, error)
 }
 
 type repository interface {
@@ -132,6 +133,51 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.JSON(w, http.StatusCreated, res)
+}
+
+// Update godoc
+//
+//	@Summary		Edita (remarca) uma reserva
+//	@Description	Cancela a reserva atual e cria uma nova com os dados enviados, numa transação só. A reserva devolvida tem **id novo** — editar é remarcar, não mutar a linha. O corpo é o mesmo do POST: `table_ids` vazio realoca automaticamente, com uma ou mais mesas usa exatamente essas. Se a nova alocação colidir, nada muda: a reserva original permanece.
+//	@Tags			reservas
+//	@Accept			json
+//	@Produce		json
+//	@Param			id		path		string			true	"ID da reserva a editar (UUID)"
+//	@Param			reserva	body		createRequest	true	"Novos dados da reserva"
+//	@Success		200		{object}	Reservation
+//	@Failure		400		{object}	httpx.ErrorResponse	"Dados inválidos, fora do expediente, mesa inativa/inexistente/repetida, ou grupo maior que a capacidade"
+//	@Failure		404		{object}	httpx.ErrorResponse	"Reserva não encontrada ou já cancelada"
+//	@Failure		409		{object}	httpx.ErrorResponse	"Mesa(s) pedida(s) ocupada(s), ou nenhuma mesa disponível no horário"
+//	@Router			/reservations/{id} [patch]
+func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "ID de reserva inválido.")
+		return
+	}
+
+	var req createRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "Corpo da requisição inválido.")
+		return
+	}
+
+	res, err := h.allocator.UpdateReservation(r.Context(), id, AllocationRequest{
+		PreferredTableIDs: req.TableIDs,
+		CustomerName:      req.CustomerName,
+		CustomerPhone:     req.CustomerPhone,
+		PartySize:         req.PartySize,
+		StartsAt:          req.StartsAt,
+		EndsAt:            req.EndsAt,
+	})
+	if err != nil {
+		responder(w, r, err, "editando reserva")
+		return
+	}
+
+	httpx.JSON(w, http.StatusOK, res)
 }
 
 // List godoc

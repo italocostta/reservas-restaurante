@@ -20,15 +20,24 @@ import (
 // que entrada inválida NÃO chega no domínio nem no banco.
 
 type fakeAllocator struct {
-	fn    func(ctx context.Context, req AllocationRequest) (Reservation, error)
-	calls int
-	visto AllocationRequest // o último pedido que chegou, já convertido
+	fn       func(ctx context.Context, req AllocationRequest) (Reservation, error)
+	updateFn func(ctx context.Context, oldID uuid.UUID, req AllocationRequest) (Reservation, error)
+	calls    int
+	visto    AllocationRequest // o último pedido que chegou, já convertido
+	vistoOld uuid.UUID         // o último id de edição
 }
 
 func (f *fakeAllocator) CreateReservation(ctx context.Context, req AllocationRequest) (Reservation, error) {
 	f.calls++
 	f.visto = req
 	return f.fn(ctx, req)
+}
+
+func (f *fakeAllocator) UpdateReservation(ctx context.Context, oldID uuid.UUID, req AllocationRequest) (Reservation, error) {
+	f.calls++
+	f.visto = req
+	f.vistoOld = oldID
+	return f.updateFn(ctx, oldID, req)
 }
 
 type fakeRepo struct {
@@ -393,6 +402,80 @@ func TestGetEDelete(t *testing.T) {
 				t.Errorf("204 veio com corpo: %s", rec.Body)
 			}
 		})
+	}
+}
+
+// ---------- PATCH /reservations/{id} ----------
+
+func TestUpdateHandler(t *testing.T) {
+	id := uuid.New()
+	nova := Reservation{ID: uuid.New(), Status: StatusConfirmed}
+
+	casos := []struct {
+		nome       string
+		id         string
+		corpo      string
+		erroDoDom  error
+		wantStatus int
+		wantCalls  int
+	}{
+		{"sucesso", id.String(), corpoValido, nil, http.StatusOK, 1},
+		{"id não é uuid", "abc", corpoValido, nil, http.StatusBadRequest, 0},
+		{"json malformado", id.String(), `{`, nil, http.StatusBadRequest, 0},
+		{"reserva não existe", id.String(), corpoValido, ErrNotFound, http.StatusNotFound, 1},
+		{"nova alocação colide", id.String(), corpoValido, ErrTableUnavailable, http.StatusConflict, 1},
+		{"validação", id.String(), corpoValido,
+			invalido("Grupo de 6 pessoas excede a capacidade da mesa (4)."), http.StatusBadRequest, 1},
+	}
+
+	for _, tc := range casos {
+		t.Run(tc.nome, func(t *testing.T) {
+			alloc := &fakeAllocator{updateFn: func(context.Context, uuid.UUID, AllocationRequest) (Reservation, error) {
+				if tc.erroDoDom != nil {
+					return Reservation{}, tc.erroDoDom
+				}
+				return nova, nil
+			}}
+
+			req := httptest.NewRequest(http.MethodPatch, "/reservations/"+tc.id, strings.NewReader(tc.corpo))
+			req.SetPathValue("id", tc.id)
+			rec := httptest.NewRecorder()
+
+			NewHandler(alloc, &fakeRepo{}, &fakeSchedule{}).Update(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, quero %d (corpo: %s)", rec.Code, tc.wantStatus, rec.Body)
+			}
+			if alloc.calls != tc.wantCalls {
+				t.Errorf("domínio chamado %d vez(es), quero %d", alloc.calls, tc.wantCalls)
+			}
+			// O id do path tem que chegar ao domínio como oldID.
+			if tc.wantCalls == 1 && tc.id != "abc" && alloc.vistoOld.String() != tc.id {
+				t.Errorf("oldID repassado = %s, quero %s", alloc.vistoOld, tc.id)
+			}
+		})
+	}
+}
+
+// O mesmo invariante do Create vale na edição: ErrSlotTaken vazando é 500, nunca
+// 409 disfarçado, e a mensagem interna não pode aparecer no corpo.
+func TestUpdateNaoDisfarcaErrSlotTaken(t *testing.T) {
+	id := uuid.New()
+	alloc := &fakeAllocator{updateFn: func(context.Context, uuid.UUID, AllocationRequest) (Reservation, error) {
+		return Reservation{}, ErrSlotTaken
+	}}
+
+	req := httptest.NewRequest(http.MethodPatch, "/reservations/"+id.String(), strings.NewReader(corpoValido))
+	req.SetPathValue("id", id.String())
+	rec := httptest.NewRecorder()
+
+	NewHandler(alloc, &fakeRepo{}, &fakeSchedule{}).Update(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, quero 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "ocupado") {
+		t.Errorf("mensagem interna vazou: %s", rec.Body)
 	}
 }
 

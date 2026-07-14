@@ -105,6 +105,22 @@ func TestRespostasBatemComOSwagger(t *testing.T) {
 			chama: (*Handler).Get,
 		},
 		{
+			nome: "PATCH /reservations/{id} 200", metodo: http.MethodPatch, rota: "/reservations/{id}",
+			allocator: &fakeAllocator{updateFn: func(context.Context, uuid.UUID, AllocationRequest) (Reservation, error) {
+				return res, nil
+			}},
+			req:   comPathValue(httptest.NewRequest(http.MethodPatch, "/reservations/"+id.String(), strings.NewReader(corpoValido)), id),
+			chama: (*Handler).Update,
+		},
+		{
+			nome: "PATCH /reservations/{id} 404", metodo: http.MethodPatch, rota: "/reservations/{id}",
+			allocator: &fakeAllocator{updateFn: func(context.Context, uuid.UUID, AllocationRequest) (Reservation, error) {
+				return Reservation{}, ErrNotFound
+			}},
+			req:   comPathValue(httptest.NewRequest(http.MethodPatch, "/reservations/"+id.String(), strings.NewReader(corpoValido)), id),
+			chama: (*Handler).Update,
+		},
+		{
 			nome: "DELETE /reservations/{id} 204", metodo: http.MethodDelete, rota: "/reservations/{id}",
 			repo:  &fakeRepo{cancelFn: func(context.Context, uuid.UUID) error { return nil }},
 			req:   comPathValue(httptest.NewRequest(http.MethodDelete, "/reservations/"+id.String(), nil), id),

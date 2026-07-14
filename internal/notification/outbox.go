@@ -15,6 +15,11 @@ type Kind string
 const (
 	KindConfirmed Kind = "reservation_confirmed"
 	KindCancelled Kind = "reservation_cancelled"
+	// KindUpdated é a edição: a reserva foi remarcada (novo horário, mesa ou
+	// tamanho). Um evento SÓ, no lugar do par cancelamento+confirmação que a
+	// edição produz por baixo — o cliente recebe "sua reserva foi alterada", não
+	// "foi cancelada" seguido de "foi confirmada", que o assustaria à toa.
+	KindUpdated Kind = "reservation_updated"
 )
 
 // Payload é o snapshot do evento, congelado no instante em que ele aconteceu.

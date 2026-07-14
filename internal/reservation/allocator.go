@@ -37,6 +37,21 @@ type ReservationCreator interface {
 	Insert(ctx context.Context, r Reservation) (Reservation, error)
 }
 
+// ReservationReplacer é a edição: cancela a reserva antiga e cria a nova numa
+// transação só. Interface separada da criação porque é outra responsabilidade —
+// e porque nem todo consumidor do allocator precisa de edição. O *PostgresRepo
+// satisfaz as duas.
+type ReservationReplacer interface {
+	Replace(ctx context.Context, oldID uuid.UUID, novo Reservation) (Reservation, error)
+}
+
+// persistir é COMO uma reserva alocada vira linha no banco. É o único ponto em que
+// criar e editar divergem: criar chama Insert (uma notificação de confirmação),
+// editar chama Replace (cancela a antiga, uma notificação de alteração). Todo o
+// resto — validação, escolha de mesa, retry — é idêntico, e é por isso que os dois
+// fluxos compartilham alocarEPersistir em vez de duplicar a máquina inteira.
+type persistir func(ctx context.Context, r Reservation) (Reservation, error)
+
 // Clock existe só para que "starts_at não pode ser no passado" seja testável.
 // Com time.Now() chamado direto, o teste precisaria de datas fixas no futuro —
 // que expiram sozinhas e quebram o build meses depois, sem ninguém ter mexido
@@ -63,14 +78,15 @@ type ServiceHours struct {
 }
 
 type Allocator struct {
-	finder  TableFinder
-	creator ReservationCreator
-	hours   ServiceHours
-	clock   Clock
+	finder   TableFinder
+	creator  ReservationCreator
+	replacer ReservationReplacer
+	hours    ServiceHours
+	clock    Clock
 }
 
-func NewAllocator(finder TableFinder, creator ReservationCreator, hours ServiceHours, clock Clock) *Allocator {
-	return &Allocator{finder: finder, creator: creator, hours: hours, clock: clock}
+func NewAllocator(finder TableFinder, creator ReservationCreator, replacer ReservationReplacer, hours ServiceHours, clock Clock) *Allocator {
+	return &Allocator{finder: finder, creator: creator, replacer: replacer, hours: hours, clock: clock}
 }
 
 // maxRetries é arbitrário — débito técnico #3 da spec. Sob contenção muito alta
@@ -79,10 +95,30 @@ func NewAllocator(finder TableFinder, creator ReservationCreator, hours ServiceH
 // dezenas de reservas simultâneas para o mesmo minuto.
 const maxRetries = 3
 
-// CreateReservation é a única porta de entrada do domínio. Decide entre os dois
-// caminhos, e cada um trata a colisão de um jeito diferente — que é a correção
-// que a primeira rodada de revisão da spec trouxe.
+// CreateReservation é a porta de criação. Persiste com Insert: uma reserva nova,
+// uma notificação de confirmação.
 func (a *Allocator) CreateReservation(ctx context.Context, req AllocationRequest) (Reservation, error) {
+	return a.alocarEPersistir(ctx, req, a.creator.Insert)
+}
+
+// UpdateReservation é a porta de edição. Reusa EXATAMENTE a mesma alocação da
+// criação — validação, escolha de mesa, retry — e só troca o modo de persistir:
+// Replace cancela a reserva antiga e cria a nova numa transação só.
+//
+// Editar é conceitualmente "remarcar": o id muda (a linha antiga vira 'cancelled',
+// nasce uma 'confirmed'), e é por isso que devolve a Reservation nova, com id novo.
+// Quem consome precisa saber disso — a reserva editada NÃO é a mesma linha.
+func (a *Allocator) UpdateReservation(ctx context.Context, oldID uuid.UUID, req AllocationRequest) (Reservation, error) {
+	return a.alocarEPersistir(ctx, req, func(c context.Context, r Reservation) (Reservation, error) {
+		return a.replacer.Replace(c, oldID, r)
+	})
+}
+
+// alocarEPersistir é o coração compartilhado. Decide entre caminho manual e
+// automático, trata a colisão de cada um do jeito certo, e delega o "gravar" ao
+// `persist` recebido. Era o corpo do CreateReservation; virou função para que a
+// edição herde tudo sem copiar uma linha.
+func (a *Allocator) alocarEPersistir(ctx context.Context, req AllocationRequest, persist persistir) (Reservation, error) {
 	if err := a.validarPedido(req); err != nil {
 		return Reservation{}, err
 	}
@@ -91,7 +127,7 @@ func (a *Allocator) CreateReservation(ctx context.Context, req AllocationRequest
 	// colisão é definitiva — as MESMAS mesas vão colidir de novo na segunda
 	// tentativa e na terceira. Não existe "próxima opção" a encontrar.
 	if len(req.PreferredTableIDs) > 0 {
-		res, err := a.tryAllocateSpecific(ctx, req)
+		res, err := a.tryAllocateSpecific(ctx, req, persist)
 		if errors.Is(err, ErrSlotTaken) {
 			return Reservation{}, ErrTableUnavailable
 		}
@@ -104,7 +140,7 @@ func (a *Allocator) CreateReservation(ctx context.Context, req AllocationRequest
 	// `for range maxRetries` — Go 1.22+. O contador não é usado no corpo, então
 	// declará-lo só para incrementá-lo seria ruído.
 	for range maxRetries {
-		res, err := a.tryAllocateAutomatic(ctx, req)
+		res, err := a.tryAllocateAutomatic(ctx, req, persist)
 		if err == nil {
 			return res, nil
 		}
@@ -181,7 +217,7 @@ func formatarHora(d time.Duration) string {
 // O ErrSlotTaken sobe daqui INTACTO. Quem decide se ele vira ErrTableUnavailable
 // (manual) ou gatilho de retry (automático) é o CreateReservation. Esta função
 // não sabe em qual dos dois caminhos está sendo usada.
-func (a *Allocator) tryAllocateSpecific(ctx context.Context, req AllocationRequest) (Reservation, error) {
+func (a *Allocator) tryAllocateSpecific(ctx context.Context, req AllocationRequest, persist persistir) (Reservation, error) {
 	ids := req.PreferredTableIDs
 
 	// Sem isto, `table_ids: [A, A]` produziria duas linhas de junção com a mesma
@@ -228,7 +264,7 @@ func (a *Allocator) tryAllocateSpecific(ctx context.Context, req AllocationReque
 		)
 	}
 
-	return a.creator.Insert(ctx, novaReserva(req, ids))
+	return persist(ctx, novaReserva(req, ids))
 }
 
 func temDuplicata(ids []uuid.UUID) bool {
@@ -251,7 +287,7 @@ func temDuplicata(ids []uuid.UUID) bool {
 // Lista vazia devolve ErrNoAvailability na hora, e NÃO ErrSlotTaken. A distinção
 // é o que impede o retry de girar em falso: "não existe mesa que sirva" é
 // definitivo, e reconsultar três vezes não vai fazer aparecer uma.
-func (a *Allocator) tryAllocateAutomatic(ctx context.Context, req AllocationRequest) (Reservation, error) {
+func (a *Allocator) tryAllocateAutomatic(ctx context.Context, req AllocationRequest, persist persistir) (Reservation, error) {
 	candidatas, err := a.finder.FindCandidates(ctx, req.PartySize, req.StartsAt, req.EndsAt)
 	if err != nil {
 		return Reservation{}, err
@@ -266,7 +302,7 @@ func (a *Allocator) tryAllocateAutomatic(ctx context.Context, req AllocationRequ
 	// itera candidatas[1] daqui. A lista é um retrato de um instante que já
 	// passou: se alguém tomou a candidatas[0], pode ter tomado a [1] também.
 	// Reconsultar custa um round-trip e devolve a verdade.
-	return a.creator.Insert(ctx, novaReserva(req, []uuid.UUID{candidatas[0].ID}))
+	return persist(ctx, novaReserva(req, []uuid.UUID{candidatas[0].ID}))
 }
 
 // novaReserva monta a linha a inserir. Status fica zerado de propósito: o

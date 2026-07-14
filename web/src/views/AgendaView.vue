@@ -16,6 +16,7 @@ const expediente = useExpedienteStore()
 const dialogoAberto = ref(false)
 const mesaPre = ref<TableAvailability | null>(null)
 const minutosPre = ref<number | null>(null)
+const reservaPre = ref<Reservation | null>(null)
 
 const reservaAberta = ref<Reservation | null>(null)
 
@@ -35,6 +36,16 @@ function andar(dias: number) {
 function abrirNova(mesa: TableAvailability | null, minutos: number | null) {
   mesaPre.value = mesa
   minutosPre.value = minutos
+  reservaPre.value = null
+  dialogoAberto.value = true
+}
+
+/** Fecha o detalhe e abre o dialog em modo edição, pré-preenchido com a reserva. */
+function abrirEdicao(reserva: Reservation) {
+  reservaAberta.value = null
+  mesaPre.value = null
+  minutosPre.value = null
+  reservaPre.value = reserva
   dialogoAberto.value = true
 }
 </script>
@@ -161,6 +172,7 @@ function abrirNova(mesa: TableAvailability | null, minutos: number | null) {
       :disponibilidade="agenda.disponibilidade"
       :mesa-pre="mesaPre"
       :minutos-pre="minutosPre"
+      :reserva-pre="reservaPre"
       @fechar="dialogoAberto = false"
       @salvo="dialogoAberto = false"
     />
@@ -169,6 +181,7 @@ function abrirNova(mesa: TableAvailability | null, minutos: number | null) {
       :reserva="reservaAberta"
       :disponibilidade="agenda.disponibilidade"
       :tz="expediente.tz"
+      @editar="abrirEdicao"
       @fechar="reservaAberta = null"
     />
   </div>

@@ -28,26 +28,19 @@ const pgCodeExclusionViolation = "23P01"
 // existe, e é essa assimetria que mantém a organização por domínio de pé.
 type PostgresRepo struct {
 	db *pgxpool.Pool
-
-	// serviceTZ era o fuso do restaurante capturado no boot (do cfg.ServiceTZ).
-	// DEIXOU de ser a fonte do fuso nas queries: cada SELECT que precisa do fuso lê
-	// o vigente do banco via tzVigenteSQL, para não ficar stale quando o staff edita
-	// o fuso pelo PUT /service-hours (era o débito #18). Mantido no struct e no
-	// construtor de propósito — removê-lo mudaria a assinatura do NewPostgresRepo e
-	// obrigaria a mexer no main.go e nos testes por um campo que hoje ninguém lê.
-	serviceTZ string
 }
 
-// tzVigenteSQL é o fuso do restaurante lido do banco A CADA query, e não o
-// serviceTZ fixo do boot. É um acoplamento de SQL assumido: reservation lê
-// restaurant_settings (tabela do domínio settings) para um único escalar. No grafo
-// de imports do Go nada muda — reservation continua sem importar settings —; no
-// banco, os dois domínios já compartilham o mesmo Postgres. É o preço de o fuso ser
-// sempre o vigente sem passar por uma interface a cada linha de SQL.
+// tzVigenteSQL é o fuso do restaurante lido do banco A CADA query, e não um fuso
+// fixo capturado no boot (que ficava stale quando o staff editava o fuso pelo PUT
+// /service-hours — era o débito #18). É um acoplamento de SQL assumido: reservation
+// lê restaurant_settings (tabela do domínio settings) para um único escalar. No
+// grafo de imports do Go nada muda — reservation continua sem importar settings —;
+// no banco, os dois domínios já compartilham o mesmo Postgres. É o preço de o fuso
+// ser sempre o vigente sem passar por uma interface a cada linha de SQL.
 const tzVigenteSQL = `(SELECT service_tz FROM restaurant_settings WHERE id = 1)`
 
-func NewPostgresRepo(db *pgxpool.Pool, serviceTZ *time.Location) *PostgresRepo {
-	return &PostgresRepo{db: db, serviceTZ: serviceTZ.String()}
+func NewPostgresRepo(db *pgxpool.Pool) *PostgresRepo {
+	return &PostgresRepo{db: db}
 }
 
 const getTableSQL = `
@@ -552,7 +545,7 @@ func (r *PostgresRepo) BusyWindowsAll(ctx context.Context, from, to time.Time) (
 // de entrada do usuário — é uma leitura do estado do mundo, e o relógio do mundo é
 // o do banco.
 // Devolve a contagem E a data da próxima (a menor starts_at), já formatada no fuso
-// VIGENTE do restaurante (tzVigenteSQL, lido do banco — não mais o serviceTZ do
+// VIGENTE do restaurante (tzVigenteSQL, lido do banco — não mais um fuso fixo do
 // boot, que ficava stale). O to_char no banco evita trazer o timestamptz cru só
 // para formatá-lo em Go — e o AT TIME ZONE garante que "17/07" seja o dia de PAREDE
 // do restaurante, não do UTC. coalesce cobre o count=0 (min de nada é NULL).
@@ -598,7 +591,7 @@ func (r *PostgresRepo) ContarReservasFuturas(ctx context.Context, tableID uuid.U
 // da mesa): a unidade aqui é a RESERVA e seu único starts_at, não a ocupação de uma
 // mesa que pode ser metade de uma combinação.
 //
-// O fuso é o do expediente CANDIDATO (novo.TZ), não o r.serviceTZ do boot: o PUT
+// O fuso é o do expediente CANDIDATO (novo.TZ), não o vigente do banco: o PUT
 // pode estar justamente mudando o fuso, e a pergunta é "sob o expediente novo, esta
 // reserva fica fora?" — logo a hora de parede tem que ser lida no fuso novo.
 //
@@ -645,8 +638,8 @@ func (r *PostgresRepo) ContarReservasForaDoExpediente(ctx context.Context, novo 
 //
 // O dia de parede é `(starts_at AT TIME ZONE <tz>)::date`: o instante 01:00 UTC é
 // 22:00 do dia anterior em SP, e é o dia de PAREDE do restaurante que a exceção
-// fecha. O fuso vem de tzVigenteSQL (lido do banco a cada query), não mais do
-// serviceTZ do boot — então esta contagem já NÃO herda o débito #18.
+// fecha. O fuso vem de tzVigenteSQL (lido do banco a cada query), não mais de um
+// fuso fixo do boot — o débito #18 foi fechado.
 //
 // `ends_at > now()`: só reservas com efeito futuro/em curso importam, igual às
 // outras duas contagens.

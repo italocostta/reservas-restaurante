@@ -72,7 +72,7 @@ func run() error {
 	// reservationRepo entra DUAS VEZES no allocator — como TableFinder e como
 	// ReservationCreator. É a mesma struct, fatiada por duas interfaces pequenas
 	// que o allocator declarou. Ele não sabe que é o mesmo objeto, e não precisa.
-	reservationRepo := reservation.NewPostgresRepo(pool, cfg.ServiceTZ)
+	reservationRepo := reservation.NewPostgresRepo(pool)
 
 	// E aqui ela entra uma TERCEIRA vez, agora atravessando a fronteira no sentido
 	// contrário: o table.Handler precisa saber se uma mesa tem reserva futura antes

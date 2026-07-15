@@ -541,8 +541,13 @@ func (r *PostgresRepo) BusyWindowsAll(ctx context.Context, from, to time.Time) (
 // testável sem datas que expiram (seção 3 da spec). Esta contagem não é validação
 // de entrada do usuário — é uma leitura do estado do mundo, e o relógio do mundo é
 // o do banco.
+// Devolve a contagem E a data da próxima (a menor starts_at), já formatada no fuso
+// do restaurante ($2). O to_char no banco evita trazer o timestamptz cru só para
+// formatá-lo em Go — e o AT TIME ZONE garante que "17/07" seja o dia de PAREDE do
+// restaurante, não do UTC. coalesce cobre o count=0 (min de nada é NULL).
 const contarReservasFuturasSQL = `
-SELECT count(*)
+SELECT count(*),
+       coalesce(to_char(min(starts_at) AT TIME ZONE $2, 'DD/MM/YYYY'), '')
 FROM reservation_tables
 WHERE table_id = $1
   AND status = 'confirmed'
@@ -559,14 +564,15 @@ WHERE table_id = $1
 // Lê reservation_tables e não reservations: uma mesa pode estar ocupada por ser
 // METADE de uma combinação (Fase 3a), e essa ocupação só existe na tabela de
 // junção.
-func (r *PostgresRepo) ContarReservasFuturas(ctx context.Context, tableID uuid.UUID) (int, error) {
+func (r *PostgresRepo) ContarReservasFuturas(ctx context.Context, tableID uuid.UUID) (int, string, error) {
 	var n int
+	var proxima string
 
-	if err := r.db.QueryRow(ctx, contarReservasFuturasSQL, tableID).Scan(&n); err != nil {
-		return 0, fmt.Errorf("contando reservas futuras da mesa %s: %w", tableID, err)
+	if err := r.db.QueryRow(ctx, contarReservasFuturasSQL, tableID, r.serviceTZ).Scan(&n, &proxima); err != nil {
+		return 0, "", fmt.Errorf("contando reservas futuras da mesa %s: %w", tableID, err)
 	}
 
-	return n, nil
+	return n, proxima, nil
 }
 
 // Cancel é o soft delete: a linha fica, sai do índice parcial da EXCLUDE (que só

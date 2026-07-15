@@ -37,7 +37,9 @@ type repository interface {
 // dela. É o mesmo padrão do TableFinder e do ScheduleReader, agora atravessando a
 // fronteira no sentido contrário.
 type agenda interface {
-	ContarReservasFuturas(ctx context.Context, tableID uuid.UUID) (int, error)
+	// Devolve quantas reservas confirmadas futuras a mesa tem e a data da próxima
+	// (DD/MM/YYYY, no fuso do restaurante; vazia quando não há nenhuma).
+	ContarReservasFuturas(ctx context.Context, tableID uuid.UUID) (int, string, error)
 }
 
 type Handler struct {
@@ -239,16 +241,18 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	// tem. É uma janela de milissegundos numa operação que o staff faz uma vez por
 	// semestre, contra um dano recuperável (reativar a mesa). Aceito, e registrado.
 	if req.IsActive != nil && !*req.IsActive {
-		n, err := h.agenda.ContarReservasFuturas(r.Context(), id)
+		n, proxima, err := h.agenda.ContarReservasFuturas(r.Context(), id)
 		if err != nil {
 			slog.Error("contando reservas da mesa", "erro", err, "id", id)
 			httpx.Error(w, http.StatusInternalServerError, "erro interno.")
 			return
 		}
 		if n > 0 {
+			// A data da próxima resolve a confusão de "a mesa está livre hoje": as
+			// reservas podem estar em OUTRO dia, e a mensagem tem que dizer qual.
 			httpx.Error(w, http.StatusConflict, fmt.Sprintf(
-				"esta mesa tem %s confirmada(s) e não pode ser desativada. Cancele-a(s) antes.",
-				pluralReservas(n)))
+				"esta mesa tem %s confirmada(s) (próxima em %s) e não pode ser desativada. Cancele-a(s) antes.",
+				pluralReservas(n), proxima))
 			return
 		}
 	}

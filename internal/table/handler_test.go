@@ -49,14 +49,15 @@ func (f *fakeRepo) Update(ctx context.Context, id uuid.UUID, p UpdateParams) (Ta
 // implementá-la é escrever esse método. É a mesma razão de o fake do repositório
 // existir — só que agora atravessando a fronteira entre dois domínios.
 type fakeAgenda struct {
-	n     int   // quantas reservas futuras a mesa tem
-	err   error // falha ao contar
-	calls int
+	n       int    // quantas reservas futuras a mesa tem
+	proxima string // data da próxima (DD/MM/YYYY)
+	err     error  // falha ao contar
+	calls   int
 }
 
-func (f *fakeAgenda) ContarReservasFuturas(context.Context, uuid.UUID) (int, error) {
+func (f *fakeAgenda) ContarReservasFuturas(context.Context, uuid.UUID) (int, string, error) {
 	f.calls++
-	return f.n, f.err
+	return f.n, f.proxima, f.err
 }
 
 // agendaVazia é o dublê padrão: mesa sem compromisso. Todo teste que NÃO é sobre
@@ -397,7 +398,7 @@ func TestUpdateMensagemDo409DizQuantasEOQueFazer(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPatch, "/tables/"+id.String(), strings.NewReader(`{"is_active":false}`))
 	req.SetPathValue("id", id.String())
 
-	NewHandler(&fakeRepo{}, &fakeAgenda{n: 1}).Update(rec, req)
+	NewHandler(&fakeRepo{}, &fakeAgenda{n: 1, proxima: "17/07/2026"}).Update(rec, req)
 
 	corpo := rec.Body.String()
 	if !strings.Contains(corpo, "1 reserva") || strings.Contains(corpo, "1 reservas") {
@@ -405,6 +406,10 @@ func TestUpdateMensagemDo409DizQuantasEOQueFazer(t *testing.T) {
 	}
 	if !strings.Contains(corpo, "Cancele") {
 		t.Errorf("mensagem = %s — precisa dizer o que fazer, não só que deu errado", corpo)
+	}
+	// A data da próxima tem que aparecer — é o que resolve o "mas está livre hoje".
+	if !strings.Contains(corpo, "17/07/2026") {
+		t.Errorf("mensagem = %s — precisa dizer QUANDO é a próxima reserva", corpo)
 	}
 }
 

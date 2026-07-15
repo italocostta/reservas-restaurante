@@ -40,6 +40,12 @@ function abrirNova(mesa: TableAvailability | null, minutos: number | null) {
   dialogoAberto.value = true
 }
 
+/** Pula direto para uma data escolhida no calendário — sem clicar a seta N vezes. */
+function irParaData(e: Event) {
+  const v = (e.target as HTMLInputElement).value
+  if (v) agenda.carregar(v)
+}
+
 /** Fecha o detalhe e abre o dialog em modo edição, pré-preenchido com a reserva. */
 function abrirEdicao(reserva: Reservation) {
   reservaAberta.value = null
@@ -67,9 +73,28 @@ function abrirEdicao(reserva: Reservation) {
               ‹
             </button>
 
-            <span class="font-display text-ink-100 min-w-40 text-center text-2xl font-bold">
-              {{ agenda.dia ? diaPorExtenso(agenda.dia, expediente.tz) : '—' }}
-            </span>
+            <!-- O texto da data É o seletor: clicar abre o calendário nativo para
+                 pular para qualquer dia. Sem isto, chegar a uma reserva de daqui a
+                 um mês exigia clicar a seta ~30 vezes. O input fica transparente
+                 por cima do texto; o title e o hover-brasa sinalizam que é
+                 clicável. -->
+            <label
+              class="group/data relative min-w-40 cursor-pointer text-center"
+              title="Clique para escolher a data"
+            >
+              <span
+                class="font-display text-ink-100 group-hover/data:text-ember-400 text-2xl font-bold transition-colors"
+              >
+                {{ agenda.dia ? diaPorExtenso(agenda.dia, expediente.tz) : '—' }}
+              </span>
+              <input
+                type="date"
+                :value="agenda.dia"
+                class="absolute inset-0 cursor-pointer opacity-0"
+                aria-label="Escolher data da agenda"
+                @change="irParaData"
+              />
+            </label>
 
             <button
               type="button"

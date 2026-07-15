@@ -36,6 +36,11 @@ type agenda interface {
 	// expediente candidato — dia fechado ou hora de início fora de [start, end) — e
 	// a data/hora da mais próxima (DD/MM/YYYY HHhMM no fuso candidato; vazia se zero).
 	ContarReservasForaDoExpediente(ctx context.Context, novo reservation.ServiceHours, diasAbertos []int) (int, string, error)
+
+	// Devolve quantas reservas confirmed (com efeito futuro) caem num dia específico
+	// (AAAA-MM-DD, dia de parede do restaurante) e a data/hora da mais próxima. É o
+	// que o POST /service-exceptions consulta antes de FECHAR uma data.
+	ContarReservasNoDia(ctx context.Context, dia string) (int, string, error)
 }
 
 type Handler struct {
@@ -236,6 +241,7 @@ type excecaoRequest struct {
 //	@Param			excecao	body		excecaoRequest	true	"Data e se abre"
 //	@Success		200		{object}	Exception
 //	@Failure		400		{object}	httpx.ErrorResponse	"Data inválida (esperado AAAA-MM-DD)"
+//	@Failure		409		{object}	httpx.ErrorResponse	"A data tem reservas confirmadas e não pode ser fechada"
 //	@Router			/service-exceptions [post]
 func (h *Handler) SaveException(w http.ResponseWriter, r *http.Request) {
 	var req excecaoRequest
@@ -249,6 +255,30 @@ func (h *Handler) SaveException(w http.ResponseWriter, r *http.Request) {
 	if _, err := time.Parse(time.DateOnly, req.Day); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "Data inválida (esperado AAAA-MM-DD).")
 		return
+	}
+
+	// FECHAR uma data (is_open=false) por cima de reservas confirmed é o mesmo buraco
+	// do PUT /service-hours e da desativação de mesa: a reserva fica de pé enquanto a
+	// agenda passa a mostrar o dia como fechado. Só o FECHAMENTO é barrado — uma
+	// abertura especial (is_open=true) só adiciona disponibilidade, nunca conflita,
+	// do mesmo jeito que reativar mesa nunca consulta a agenda.
+	//
+	// Check-then-act com a corrida de sempre (uma reserva pode nascer entre a
+	// contagem e o upsert), aceita pelos mesmos motivos. Falha ao contar vira 500,
+	// nunca 409: erro de banco significa "não sei se pode".
+	if !req.IsOpen {
+		n, proxima, err := h.agenda.ContarReservasNoDia(r.Context(), req.Day)
+		if err != nil {
+			slog.Error("contando reservas no dia da exceção", "erro", err)
+			httpx.Error(w, http.StatusInternalServerError, "Erro interno.")
+			return
+		}
+		if n > 0 {
+			httpx.Error(w, http.StatusConflict, fmt.Sprintf(
+				"Esta data tem %s confirmada(s) (próxima em %s) e não pode ser fechada. Cancele-a(s) antes.",
+				pluralReservas(n), proxima))
+			return
+		}
 	}
 
 	ex := Exception{Day: req.Day, IsOpen: req.IsOpen, Note: req.Note}

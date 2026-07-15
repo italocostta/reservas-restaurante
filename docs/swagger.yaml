@@ -435,6 +435,10 @@ paths:
           description: Data inválida (esperado AAAA-MM-DD)
           schema:
             $ref: '#/definitions/httpx.ErrorResponse'
+        "409":
+          description: A data tem reservas confirmadas e não pode ser fechada
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
       summary: Marca uma data como fechada ou aberta (exceção)
       tags:
       - restaurante

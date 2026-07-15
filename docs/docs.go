@@ -321,6 +321,12 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/httpx.ErrorResponse"
                         }
+                    },
+                    "409": {
+                        "description": "A data tem reservas confirmadas e não pode ser fechada",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
                     }
                 }
             }

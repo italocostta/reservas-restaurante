@@ -15,7 +15,8 @@ import (
 // repoStub satisfaz `repository` e registra se o Save foi tocado — o ponto do teste
 // é justamente que o 409 barra ANTES do Save.
 type repoStub struct {
-	saves int
+	saves    int // chamadas a Save (PUT)
+	excSaves int // chamadas a SaveExcecao (POST exceção)
 }
 
 func (s *repoStub) Load(context.Context) (Settings, error) {
@@ -27,20 +28,28 @@ func (s *repoStub) Load(context.Context) (Settings, error) {
 }
 func (s *repoStub) Save(context.Context, Settings) error              { s.saves++; return nil }
 func (s *repoStub) ListExcecoes(context.Context) ([]Exception, error) { return nil, nil }
-func (s *repoStub) SaveExcecao(context.Context, Exception) error      { return nil }
+func (s *repoStub) SaveExcecao(context.Context, Exception) error      { s.excSaves++; return nil }
 func (s *repoStub) DeleteExcecao(context.Context, string) error       { return nil }
 
 // agendaStub é o dublê configurável da contagem: n reservas fora, ou um erro ao
 // contar. Registra as chamadas para o teste provar que a contagem foi consultada.
 type agendaStub struct {
-	n       int
-	proxima string
-	err     error
-	calls   int
+	n        int
+	proxima  string
+	err      error
+	calls    int // chamadas a ContarReservasForaDoExpediente (PUT)
+	diaCalls int // chamadas a ContarReservasNoDia (exceção)
 }
 
 func (a *agendaStub) ContarReservasForaDoExpediente(context.Context, reservation.ServiceHours, []int) (int, string, error) {
 	a.calls++
+	return a.n, a.proxima, a.err
+}
+
+// diaCalls conta separado: o teste de exceção precisa provar que a contagem POR DIA
+// foi (ou não) consultada, sem confundir com a checagem do PUT.
+func (a *agendaStub) ContarReservasNoDia(context.Context, string) (int, string, error) {
+	a.diaCalls++
 	return a.n, a.proxima, a.err
 }
 
@@ -139,6 +148,95 @@ func TestUpdateMensagemDo409DizQuantasEQuando(t *testing.T) {
 		t.Errorf("mensagem = %s — precisa dizer QUANTAS reservas (e '1 reserva', não '1 reservas')", corpo)
 	}
 	if !strings.Contains(corpo, "20/07/2026 20h00") {
+		t.Errorf("mensagem = %s — precisa dizer QUANDO é a mais próxima", corpo)
+	}
+}
+
+// Fechar uma data com reserva confirmed em cima é o débito #17: a reserva ficaria de
+// pé enquanto a agenda passaria a mostrar o dia como fechado. O 409 barra antes do
+// upsert. E o caso que distingue esta checagem da do PUT: ABRIR (is_open=true) nunca
+// consulta a agenda — só adiciona disponibilidade, como reativar mesa.
+func TestSaveExceptionNaoFechaDataComReserva(t *testing.T) {
+	casos := []struct {
+		nome       string
+		corpo      string
+		agenda     *agendaStub
+		wantStatus int
+		wantContou int // ContarReservasNoDia foi chamada?
+		wantSaves  int // a exceção chegou a ser gravada?
+	}{
+		{
+			nome:       "fechar data com reserva → 409, sem gravar",
+			corpo:      `{"day":"2026-12-25","is_open":false,"note":"Natal"}`,
+			agenda:     &agendaStub{n: 2, proxima: "25/12/2026 20h00"},
+			wantStatus: http.StatusConflict, wantContou: 1, wantSaves: 0,
+		},
+		{
+			nome:       "fechar data livre → 200, grava",
+			corpo:      `{"day":"2026-12-25","is_open":false,"note":"Natal"}`,
+			agenda:     &agendaStub{n: 0},
+			wantStatus: http.StatusOK, wantContou: 1, wantSaves: 1,
+		},
+		{
+			// ABRIR não é fechar: é abertura especial num dia normalmente fechado. Se
+			// este caso passar a chamar a contagem, alguém trocou `!req.IsOpen` por
+			// algo que barra os dois — e aí abrir um dia viraria refém de reservas que
+			// nem podiam existir num dia fechado.
+			nome:       "ABRIR data (is_open=true) não consulta a agenda",
+			corpo:      `{"day":"2026-12-25","is_open":true,"note":"evento"}`,
+			agenda:     &agendaStub{n: 99},
+			wantStatus: http.StatusOK, wantContou: 0, wantSaves: 1,
+		},
+		{
+			// Erro de banco na contagem significa "não sei se pode": 500, não 409, e
+			// não grava.
+			nome:       "falha ao contar → 500, sem gravar",
+			corpo:      `{"day":"2026-12-25","is_open":false}`,
+			agenda:     &agendaStub{err: errors.New("db caiu")},
+			wantStatus: http.StatusInternalServerError, wantContou: 1, wantSaves: 0,
+		},
+	}
+
+	for _, tc := range casos {
+		t.Run(tc.nome, func(t *testing.T) {
+			repo := &repoStub{}
+			h := NewHandler(repo, tc.agenda)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/service-exceptions", strings.NewReader(tc.corpo))
+			h.SaveException(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, quero %d — corpo: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.agenda.diaCalls != tc.wantContou {
+				t.Errorf("ContarReservasNoDia chamada %d vez(es), quero %d", tc.agenda.diaCalls, tc.wantContou)
+			}
+			if repo.excSaves != tc.wantSaves {
+				t.Errorf("SaveExcecao chamado %d vez(es), quero %d — o 409/500 tem que barrar ANTES de gravar",
+					repo.excSaves, tc.wantSaves)
+			}
+		})
+	}
+}
+
+// A mensagem do 409 da exceção, como a do PUT, diz QUANTAS e QUANDO — o staff que a
+// lê precisa saber o que cancelar antes.
+func TestSaveExceptionMensagemDo409(t *testing.T) {
+	repo := &repoStub{}
+	ag := &agendaStub{n: 1, proxima: "25/12/2026 20h00"}
+	h := NewHandler(repo, ag)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/service-exceptions",
+		strings.NewReader(`{"day":"2026-12-25","is_open":false}`))
+	h.SaveException(rec, req)
+
+	corpo := rec.Body.String()
+	if !strings.Contains(corpo, "1 reserva") {
+		t.Errorf("mensagem = %s — precisa dizer QUANTAS reservas", corpo)
+	}
+	if !strings.Contains(corpo, "25/12/2026 20h00") {
 		t.Errorf("mensagem = %s — precisa dizer QUANDO é a mais próxima", corpo)
 	}
 }

@@ -627,6 +627,41 @@ func (r *PostgresRepo) ContarReservasForaDoExpediente(ctx context.Context, novo 
 	return n, proxima, nil
 }
 
+// Ao contrário da ContarReservasForaDoExpediente, aqui NÃO há janela de horas a
+// checar: fechar uma data (POST /service-exceptions com is_open=false) fecha o dia
+// INTEIRO, então qualquer reserva confirmed naquele dia de parede conflita — é o
+// análogo da desativação de mesa, onde a coisa toda some. Basta o dia bater.
+//
+// O dia de parede é `(starts_at AT TIME ZONE $2)::date`: o instante 01:00 UTC é
+// 22:00 do dia anterior em SP, e é o dia de PAREDE do restaurante que a exceção
+// fecha. Usa r.serviceTZ, e portanto herda o débito #18 (fuso fixo do boot fica
+// stale se o TZ for editado) — mesma limitação da ContarReservasFuturas da mesa.
+//
+// `ends_at > now()`: só reservas com efeito futuro/em curso importam, igual às
+// outras duas contagens.
+const contarReservasNoDiaSQL = `
+SELECT count(*),
+       coalesce(to_char(min(starts_at) AT TIME ZONE $2, 'DD/MM/YYYY HH24hMI'), '')
+FROM reservations
+WHERE status = 'confirmed'
+  AND ends_at > now()
+  AND (starts_at AT TIME ZONE $2)::date = $1::date`
+
+// ContarReservasNoDia responde a pergunta que o POST /service-exceptions precisa
+// fazer antes de fechar uma data: "quantas reservas confirmed caem neste dia, e
+// qual a mais próxima?". Terceira travessia settings/table → reservation pela mesma
+// assimetria (seção 15): o consumidor declara a interface, este repo a satisfaz.
+func (r *PostgresRepo) ContarReservasNoDia(ctx context.Context, dia string) (int, string, error) {
+	var n int
+	var proxima string
+
+	if err := r.db.QueryRow(ctx, contarReservasNoDiaSQL, dia, r.serviceTZ).Scan(&n, &proxima); err != nil {
+		return 0, "", fmt.Errorf("contando reservas no dia %s: %w", dia, err)
+	}
+
+	return n, proxima, nil
+}
+
 // Cancel é o soft delete: a linha fica, sai do índice parcial da EXCLUDE (que só
 // indexa status='confirmed') e libera o horário.
 //

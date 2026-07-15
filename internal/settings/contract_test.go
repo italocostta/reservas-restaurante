@@ -34,6 +34,10 @@ func (fakeAgenda) ContarReservasForaDoExpediente(context.Context, reservation.Se
 	return 0, "", nil
 }
 
+func (fakeAgenda) ContarReservasNoDia(context.Context, string) (int, string, error) {
+	return 0, "", nil
+}
+
 func repoPadrao(t *testing.T) *fakeRepo {
 	t.Helper()
 	tz, err := time.LoadLocation("America/Sao_Paulo")

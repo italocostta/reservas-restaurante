@@ -71,9 +71,21 @@ func mesaDeTeste(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 }
 
 func limparMesasDeTeste(ctx context.Context, pool *pgxpool.Pool) {
+	// Desde a Fase 3a a reserva não guarda mais `table_id` — a associação mora em
+	// reservation_tables (0007 dropou a coluna). Apagamos as reservas por essa
+	// junção; o ON DELETE CASCADE de reservation_tables.reservation_id (0006) limpa
+	// as linhas de junção junto. Só então as mesas saem: reservation_tables.table_id
+	// referencia restaurant_tables SEM cascade, então uma linha de junção sobrando
+	// apontando para a mesa faria o DELETE da mesa falhar.
+	//
+	// A versão anterior fazia `DELETE FROM reservations WHERE table_id IN (...)`,
+	// contra a coluna que a 0007 removeu — e vinha falhando EM SILÊNCIO (o erro do
+	// Exec era ignorado) desde então, deixando reservas de teste órfãs no banco.
 	pool.Exec(ctx, `
 		DELETE FROM reservations
-		WHERE table_id IN (SELECT id FROM restaurant_tables WHERE name LIKE 'teste-%')`)
+		WHERE id IN (
+			SELECT reservation_id FROM reservation_tables
+			WHERE table_id IN (SELECT id FROM restaurant_tables WHERE name LIKE 'teste-%'))`)
 	pool.Exec(ctx, `DELETE FROM restaurant_tables WHERE name LIKE 'teste-%'`)
 }
 
@@ -128,8 +140,11 @@ func contarConfirmadas(t *testing.T, pool *pgxpool.Pool, tableID uuid.UUID) int 
 	t.Helper()
 
 	var n int
+	// reservation_tables, e não reservations: a Fase 3a (0007) removeu a coluna
+	// reservations.table_id — a mesa de uma reserva vive na junção. Cada reserva de
+	// mesa única (o caso destes testes) é exatamente uma linha aqui.
 	err := pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM reservations WHERE table_id = $1 AND status = 'confirmed'`,
+		`SELECT count(*) FROM reservation_tables WHERE table_id = $1 AND status = 'confirmed'`,
 		tableID,
 	).Scan(&n)
 	if err != nil {
@@ -224,5 +239,68 @@ func conferir(t *testing.T, erros []error, esperado error) {
 
 	if sucessos != 1 {
 		t.Fatalf("%d sucessos, quero exatamente 1 — a corrida não foi resolvida", sucessos)
+	}
+}
+
+// TestQueriesComFusoDoBanco exercita, contra um Postgres real, as três queries que
+// passaram a ler o fuso do banco via tzVigenteSQL (débito #18): List com ?date=,
+// ContarReservasFuturas e ContarReservasNoDia. É a verificação que faltava — compilar
+// e passar no `vet` não prova que `AT TIME ZONE (SELECT service_tz FROM
+// restaurant_settings WHERE id = 1)` é SQL válido contra o schema; só rodar prova.
+//
+// A checagem mais forte é `err == nil`: se a subquery fosse inválida, as três
+// falhariam aqui. As contagens confirmam de quebra que a query enxerga a reserva
+// recém-criada. ContarReservasFuturas conta por table_id/status/ends_at (não depende
+// do fuso), então seu n>=1 é sólido; List e ContarReservasNoDia filtram por dia de
+// parede e assumem que o service_tz do banco é o de São Paulo (o do fusoSP) — se o
+// banco de teste estiver configurado com outro fuso, é aí que a falha aponta.
+func TestQueriesComFusoDoBanco(t *testing.T) {
+	pool := poolDeTeste(t)
+	tableID := mesaDeTeste(t, pool)
+
+	repo := NewPostgresRepo(pool)
+	alloc := NewAllocator(repo, repo, repo, expedienteDeTeste(), SystemClock{})
+	inicio, fim := janelaFutura()
+
+	ctx := context.Background()
+	_, err := alloc.CreateReservation(ctx, AllocationRequest{
+		PreferredTableIDs: []uuid.UUID{tableID},
+		CustomerName:      "Cliente #18",
+		CustomerPhone:     "11999998888",
+		PartySize:         capacidadeDeTeste,
+		StartsAt:          inicio,
+		EndsAt:            fim,
+	})
+	if err != nil {
+		t.Fatalf("criando reserva de teste: %v", err)
+	}
+
+	dia := inicio.In(fusoSP).Format(time.DateOnly)
+
+	// 1. List com ?date= — tzVigenteSQL no listSQL.
+	reservas, err := repo.List(ctx, ListFilter{Date: &dia})
+	if err != nil {
+		t.Fatalf("List com ?date=%s: %v", dia, err)
+	}
+	if len(reservas) == 0 {
+		t.Errorf("List(%s) não achou a reserva recém-criada — subquery de fuso ou service_tz do banco?", dia)
+	}
+
+	// 2. ContarReservasFuturas — tzVigenteSQL no contarReservasFuturasSQL.
+	n, proxima, err := repo.ContarReservasFuturas(ctx, tableID)
+	if err != nil {
+		t.Fatalf("ContarReservasFuturas: %v", err)
+	}
+	if n < 1 || proxima == "" {
+		t.Errorf("ContarReservasFuturas = (%d, %q), quero n>=1 e a data da próxima não-vazia", n, proxima)
+	}
+
+	// 3. ContarReservasNoDia — tzVigenteSQL no contarReservasNoDiaSQL.
+	n, proxima, err = repo.ContarReservasNoDia(ctx, dia)
+	if err != nil {
+		t.Fatalf("ContarReservasNoDia(%s): %v", dia, err)
+	}
+	if n < 1 || proxima == "" {
+		t.Errorf("ContarReservasNoDia(%s) = (%d, %q), quero n>=1 e a data da próxima não-vazia", dia, n, proxima)
 	}
 }

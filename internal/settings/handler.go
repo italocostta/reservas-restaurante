@@ -299,12 +299,48 @@ func (h *Handler) SaveException(w http.ResponseWriter, r *http.Request) {
 //	@Param			day	path	string	true	"Data da exceção (AAAA-MM-DD)"
 //	@Success		204	"Removida"
 //	@Failure		400	{object}	httpx.ErrorResponse	"Data inválida"
+//	@Failure		409	{object}	httpx.ErrorResponse	"Remover a exceção re-fecharia o dia, que tem reservas confirmadas"
 //	@Router			/service-exceptions/{day} [delete]
 func (h *Handler) DeleteException(w http.ResponseWriter, r *http.Request) {
 	dia := r.PathValue("day")
 	if _, err := time.Parse(time.DateOnly, dia); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "Data inválida (esperado AAAA-MM-DD).")
 		return
+	}
+
+	// Apagar uma exceção faz a data voltar à regra semanal. Se a data era uma
+	// ABERTURA especial (is_open=true) num dia normalmente fechado, removê-la
+	// RE-FECHA o dia — e as reservas criadas durante a abertura ficariam órfãs no dia
+	// que a agenda passa a mostrar como fechado. É a terceira porta do mesmo gap do
+	// PUT /service-hours (seção 16) e do POST (débito #17).
+	//
+	// A checagem só importa quando o dia fica FECHADO depois da remoção — ou seja,
+	// quando o dia da semana NÃO está no open_weekdays. Se a regra semanal já abre
+	// aquele dia, remover a exceção no máximo re-abre, e re-abrir nunca estranha
+	// ninguém (mesmo princípio de reativar mesa e de is_open=true no POST).
+	s, err := h.repo.Load(r.Context())
+	if err != nil {
+		slog.Error("lendo settings para checar remoção de exceção", "erro", err)
+		httpx.Error(w, http.StatusInternalServerError, "Erro interno.")
+		return
+	}
+	// O formato de `dia` já foi validado acima; o fuso do restaurante mantém a
+	// convenção de dia de parede que o AbertoEm usa (embora, para uma data pura, o
+	// dia da semana não dependa do fuso).
+	d, _ := time.ParseInLocation(time.DateOnly, dia, s.Hours.TZ)
+	if !s.OpenWeekdays[d.Weekday()] {
+		n, proxima, err := h.agenda.ContarReservasNoDia(r.Context(), dia)
+		if err != nil {
+			slog.Error("contando reservas no dia da exceção a remover", "erro", err)
+			httpx.Error(w, http.StatusInternalServerError, "Erro interno.")
+			return
+		}
+		if n > 0 {
+			httpx.Error(w, http.StatusConflict, fmt.Sprintf(
+				"Esta data tem %s confirmada(s) (próxima em %s) e voltaria a ser um dia fechado ao remover a exceção. Cancele-a(s) antes.",
+				pluralReservas(n), proxima))
+			return
+		}
 	}
 
 	if err := h.repo.DeleteExcecao(r.Context(), dia); err != nil {

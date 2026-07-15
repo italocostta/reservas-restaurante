@@ -138,16 +138,22 @@ type NotificationView struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+// LIMIT 500: o cenário que este endpoint existe para observar é JUSTAMENTE uma
+// falha sistêmica, quando 'failed' vira milhares — e aí um SELECT sem teto devolve
+// milhares de linhas e vira um segundo incidente. O teto protege o servidor no pior
+// caso; o desempate por id torna a ordem estável quando o created_at empata (linhas
+// gravadas no mesmo instante), evitando que a mesma consulta troque a ordem.
 const listByStatusSQL = `
 SELECT id, reservation_id, kind, status, attempts, coalesce(last_error, ''), created_at
 FROM notifications
 WHERE status = $1
-ORDER BY created_at DESC`
+ORDER BY created_at DESC, id DESC
+LIMIT 500`
 
 // ListByStatus lê as notificações de um status para inspeção. Ordena da mais recente
-// para a mais antiga: quem abre esta lista quer ver a última falha primeiro. Não
-// pagina — para o volume de um restaurante, as 'failed' são poucas (e se um dia não
-// forem, isso mesmo é o sinal de alarme que o débito #11 queria tornar visível).
+// para a mais antiga: quem abre esta lista quer ver a última falha primeiro. O teto
+// de 500 (ver o SQL) é bounded de propósito — um GET que devolve tudo sob falha em
+// massa é o oposto de observabilidade.
 func (r *PostgresRepo) ListByStatus(ctx context.Context, status string) ([]NotificationView, error) {
 	rows, err := r.db.Query(ctx, listByStatusSQL, status)
 	if err != nil {

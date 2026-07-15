@@ -4,9 +4,11 @@ import type {
   DateOnly,
   Reservation,
   ReservationFilters,
+  ServiceException,
   ServiceHours,
   Table,
   TableAvailability,
+  UpdateServiceHoursInput,
   UpdateTableInput,
   UUID,
   Window,
@@ -64,7 +66,7 @@ export class NetworkError extends Error {
   }
 }
 
-type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE'
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
 /**
  * O wrapper existe para UMA coisa: garantir que `{"error": "..."}` vire ApiError
@@ -178,4 +180,13 @@ export const api = {
     request<TableAvailability[]>('GET', `/availability${query({ date })}`),
 
   serviceHours: () => request<ServiceHours>('GET', '/service-hours'),
+
+  updateServiceHours: (input: UpdateServiceHoursInput) =>
+    request<ServiceHours>('PUT', '/service-hours', input),
+
+  saveException: (ex: ServiceException) =>
+    request<ServiceException>('POST', '/service-exceptions', ex),
+
+  deleteException: (day: DateOnly) =>
+    request<void>('DELETE', `/service-exceptions/${day}`),
 }

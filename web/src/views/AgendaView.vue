@@ -132,6 +132,16 @@ function abrirEdicao(reserva: Reservation) {
       {{ agenda.erroDeCarga }}
     </p>
 
+    <!-- Dia fechado: um aviso explícito, não uma grade vazia que parece "sem
+         mesas". O backend recusa reserva neste dia; a UI diz por quê. -->
+    <div
+      v-else-if="!expediente.diaAberto(agenda.dia)"
+      class="border-ink-800 bg-ink-900/40 border py-16 text-center"
+    >
+      <p class="font-display text-ink-300 text-lg font-semibold">Restaurante fechado</p>
+      <p class="text-ink-500 mt-1 text-sm">Não há reservas neste dia.</p>
+    </div>
+
     <template v-else>
       <GradeDia
         :linhas="agenda.linhas"

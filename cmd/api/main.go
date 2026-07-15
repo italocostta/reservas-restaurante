@@ -17,6 +17,7 @@ import (
 	"reservas-restaurante/internal/httpserver"
 	"reservas-restaurante/internal/notification"
 	"reservas-restaurante/internal/reservation"
+	"reservas-restaurante/internal/settings"
 	"reservas-restaurante/internal/table"
 )
 
@@ -86,28 +87,30 @@ func run() error {
 	// grafo de beans.
 	tableHandler := table.NewHandler(tableRepo, reservationRepo)
 
-	// Aqui é onde a Config (infra) vira ServiceHours (domínio). O pacote
-	// reservation não importa config: quem traduz é o main.go.
-	hours := reservation.ServiceHours{
-		Start: cfg.ServiceStart,
-		End:   cfg.ServiceEnd,
-		TZ:    cfg.ServiceTZ,
-	}
+	// A config editável do restaurante (migration 0009). O settingsRepo satisfaz a
+	// reservation.ExpedienteVigente — é por ele que o horário e os dias de
+	// funcionamento gravados no banco chegam ao allocator e à agenda, dinamicamente.
+	settingsRepo := settings.NewPostgresRepo(pool)
+	settingsHandler := settings.NewHandler(settingsRepo)
 
+	// O expediente NÃO vem mais da Config para o domínio: vem do settingsRepo, que
+	// lê a config editável do banco (migration 0009). Editar o horário passou a
+	// afetar as reservas novas — antes era um valor fixo do boot.
+	//
 	// reservationRepo entra três vezes: TableFinder + ReservationCreator +
-	// ReservationReplacer. A mesma struct, três interfaces pequenas declaradas
-	// pelo allocator. Ele não sabe que é o mesmo objeto — nem precisa.
+	// ReservationReplacer. A mesma struct, interfaces pequenas declaradas pelo
+	// allocator. Ele não sabe que é o mesmo objeto — nem precisa.
 	allocator := reservation.NewAllocator(
 		reservationRepo,
 		reservationRepo,
 		reservationRepo,
-		hours,
+		settingsRepo,
 		reservation.SystemClock{},
 	)
-	schedule := reservation.NewSchedule(reservationRepo, hours)
+	schedule := reservation.NewSchedule(reservationRepo, settingsRepo)
 	reservationHandler := reservation.NewHandler(allocator, reservationRepo, schedule)
 
-	router := httpserver.New(cfg, tableHandler, reservationHandler)
+	router := httpserver.New(cfg, tableHandler, reservationHandler, settingsHandler)
 
 	// O dispatcher tem contexto PRÓPRIO, derivado com WithoutCancel do ctx do
 	// sinal. Ele precisa sobreviver ao Ctrl+C para ser derrubado só DEPOIS do

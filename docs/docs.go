@@ -285,21 +285,129 @@ const docTemplate = `{
                 }
             }
         },
-        "/service-hours": {
-            "get": {
-                "description": "Horário de funcionamento e fuso usados por toda a API: a validação de ` + "`" + `starts_at` + "`" + ` na criação de reserva e o cálculo das janelas livres. O frontend lê daqui em vez de guardar uma cópia.",
+        "/service-exceptions": {
+            "post": {
+                "description": "Define que uma data específica foge da regra semanal: fechada num dia normalmente aberto, ou aberta num dia normalmente fechado. Reenviar a mesma data sobrescreve.",
+                "consumes": [
+                    "application/json"
+                ],
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "restaurante"
                 ],
-                "summary": "Expediente do restaurante",
+                "summary": "Marca uma data como fechada ou aberta (exceção)",
+                "parameters": [
+                    {
+                        "description": "Data e se abre",
+                        "name": "excecao",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/settings.excecaoRequest"
+                        }
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/httpserver.ServiceHours"
+                            "$ref": "#/definitions/settings.Exception"
+                        }
+                    },
+                    "400": {
+                        "description": "Data inválida (esperado AAAA-MM-DD)",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/service-exceptions/{day}": {
+            "delete": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "restaurante"
+                ],
+                "summary": "Remove uma exceção (a data volta a seguir a regra semanal)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Data da exceção (AAAA-MM-DD)",
+                        "name": "day",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Removida"
+                    },
+                    "400": {
+                        "description": "Data inválida",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/service-hours": {
+            "get": {
+                "description": "Horário, fuso, dias da semana em que abre (0=domingo … 6=sábado) e as exceções por data. O frontend lê daqui em vez de guardar uma cópia.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "restaurante"
+                ],
+                "summary": "Expediente e dias de funcionamento do restaurante",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/settings.SettingsResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "restaurante"
+                ],
+                "summary": "Altera o expediente e os dias de funcionamento",
+                "parameters": [
+                    {
+                        "description": "Novo expediente",
+                        "name": "expediente",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/settings.updateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/settings.SettingsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Horário/fuso inválido, ou fim não é depois do início",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
                         }
                     }
                 }
@@ -531,23 +639,6 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "httpserver.ServiceHours": {
-            "type": "object",
-            "properties": {
-                "end": {
-                    "type": "string",
-                    "example": "23:00"
-                },
-                "start": {
-                    "type": "string",
-                    "example": "18:00"
-                },
-                "tz": {
-                    "type": "string",
-                    "example": "America/Sao_Paulo"
-                }
-            }
-        },
         "httpx.ErrorResponse": {
             "type": "object",
             "properties": {
@@ -673,6 +764,111 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "settings.Exception": {
+            "type": "object",
+            "properties": {
+                "day": {
+                    "description": "AAAA-MM-DD",
+                    "type": "string",
+                    "example": "2026-12-25"
+                },
+                "is_open": {
+                    "type": "boolean",
+                    "example": false
+                },
+                "note": {
+                    "type": "string",
+                    "example": "Natal"
+                }
+            }
+        },
+        "settings.SettingsResponse": {
+            "type": "object",
+            "properties": {
+                "end": {
+                    "type": "string",
+                    "example": "23:00"
+                },
+                "exceptions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/settings.Exception"
+                    }
+                },
+                "open_weekdays": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    },
+                    "example": [
+                        0,
+                        1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6
+                    ]
+                },
+                "start": {
+                    "type": "string",
+                    "example": "18:00"
+                },
+                "tz": {
+                    "type": "string",
+                    "example": "America/Sao_Paulo"
+                }
+            }
+        },
+        "settings.excecaoRequest": {
+            "type": "object",
+            "properties": {
+                "day": {
+                    "type": "string",
+                    "example": "2026-12-25"
+                },
+                "is_open": {
+                    "type": "boolean",
+                    "example": false
+                },
+                "note": {
+                    "type": "string",
+                    "example": "Natal"
+                }
+            }
+        },
+        "settings.updateRequest": {
+            "type": "object",
+            "properties": {
+                "end": {
+                    "type": "string",
+                    "example": "23:00"
+                },
+                "open_weekdays": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    },
+                    "example": [
+                        0,
+                        1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6
+                    ]
+                },
+                "start": {
+                    "type": "string",
+                    "example": "18:00"
+                },
+                "tz": {
+                    "type": "string",
+                    "example": "America/Sao_Paulo"
                 }
             }
         },

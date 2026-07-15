@@ -10,6 +10,7 @@ const titulo = computed(() => (route.meta.titulo as string) ?? '')
 const navegacao = [
   { para: '/reservas', rotulo: 'Agenda' },
   { para: '/mesas', rotulo: 'Salão' },
+  { para: '/restaurante', rotulo: 'Restaurante' },
 ]
 </script>
 

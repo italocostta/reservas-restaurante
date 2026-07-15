@@ -24,6 +24,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/MesasView.vue'),
     meta: { titulo: 'Salão' },
   },
+  {
+    path: '/restaurante',
+    name: 'restaurante',
+    component: () => import('@/views/ConfiguracaoView.vue'),
+    meta: { titulo: 'Restaurante' },
+  },
 ]
 
 export const router = createRouter({

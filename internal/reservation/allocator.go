@@ -77,16 +77,32 @@ type ServiceHours struct {
 	TZ    *time.Location
 }
 
-type Allocator struct {
-	finder   TableFinder
-	creator  ReservationCreator
-	replacer ReservationReplacer
-	hours    ServiceHours
-	clock    Clock
+// ExpedienteVigente é o provedor do horário e dos dias de funcionamento — que
+// desde a Fase de config editável (migration 0009) podem MUDAR em runtime. Por
+// isso não é mais um ServiceHours fixo no construtor: o allocator pergunta o
+// expediente vigente a cada validação, senão editar o horário no banco não
+// afetaria as reservas novas.
+//
+// Declarada aqui, pelo consumidor. O settings.PostgresRepo a satisfaz — e o
+// pacote reservation não importa settings (seria ciclo: settings importa
+// reservation pelo ServiceHours). Consumidor define, provedor satisfaz.
+type ExpedienteVigente interface {
+	HorasVigentes(ctx context.Context) (ServiceHours, error)
+	// AbertoEm diz se o restaurante opera na data (AAAA-MM-DD), considerando dia da
+	// semana e exceções. Devolve ValidationError se a data for malformada.
+	AbertoEm(ctx context.Context, dia string) (bool, error)
 }
 
-func NewAllocator(finder TableFinder, creator ReservationCreator, replacer ReservationReplacer, hours ServiceHours, clock Clock) *Allocator {
-	return &Allocator{finder: finder, creator: creator, replacer: replacer, hours: hours, clock: clock}
+type Allocator struct {
+	finder     TableFinder
+	creator    ReservationCreator
+	replacer   ReservationReplacer
+	expediente ExpedienteVigente
+	clock      Clock
+}
+
+func NewAllocator(finder TableFinder, creator ReservationCreator, replacer ReservationReplacer, expediente ExpedienteVigente, clock Clock) *Allocator {
+	return &Allocator{finder: finder, creator: creator, replacer: replacer, expediente: expediente, clock: clock}
 }
 
 // maxRetries é arbitrário — débito técnico #3 da spec. Sob contenção muito alta
@@ -119,7 +135,7 @@ func (a *Allocator) UpdateReservation(ctx context.Context, oldID uuid.UUID, req 
 // `persist` recebido. Era o corpo do CreateReservation; virou função para que a
 // edição herde tudo sem copiar uma linha.
 func (a *Allocator) alocarEPersistir(ctx context.Context, req AllocationRequest, persist persistir) (Reservation, error) {
-	if err := a.validarPedido(req); err != nil {
+	if err := a.validarPedido(ctx, req); err != nil {
 		return Reservation{}, err
 	}
 
@@ -159,12 +175,14 @@ func (a *Allocator) alocarEPersistir(ctx context.Context, req AllocationRequest,
 	return Reservation{}, ErrNoAvailability
 }
 
-// validarPedido roda só as validações que NÃO precisam de I/O: as que dependem
-// do pedido, do relógio e do horário de funcionamento. As que dependem da mesa
-// (existe? está ativa? comporta o grupo?) ficam no caminho manual, porque exigem
-// ir ao banco buscá-la — separar isso é o que faz esta função ser testável em
-// microssegundos e sem fake nenhum.
-func (a *Allocator) validarPedido(req AllocationRequest) error {
+// validarPedido roda as validações que dependem do pedido, do relógio e do
+// expediente vigente. As que dependem da mesa (existe? ativa? comporta o grupo?)
+// ficam no caminho manual, porque exigem ir ao banco buscá-la.
+//
+// Ganhou ctx porque o expediente agora é lido do banco (editável em runtime), não
+// mais um campo fixo. As validações puras (pessoas, nome, ordem, passado) rodam
+// ANTES do I/O, então um pedido obviamente inválido nem toca no banco.
+func (a *Allocator) validarPedido(ctx context.Context, req AllocationRequest) error {
 	if req.PartySize <= 0 {
 		return invalido("O número de pessoas deve ser maior que zero.")
 	}
@@ -181,20 +199,36 @@ func (a *Allocator) validarPedido(req AllocationRequest) error {
 		return invalido("Não é possível reservar para um horário no passado.")
 	}
 
+	hours, err := a.expediente.HorasVigentes(ctx)
+	if err != nil {
+		return err
+	}
+
 	// Hora de parede NO FUSO DO RESTAURANTE — não em UTC, não no fuso do
 	// servidor. Mesma armadilha do filtro ?date=: o instante 01:00 UTC é 22:00
 	// em São Paulo, e é o 22:00 que precisa caber no expediente.
-	local := req.StartsAt.In(a.hours.TZ)
+	local := req.StartsAt.In(hours.TZ)
 	desdeMeiaNoite := time.Duration(local.Hour())*time.Hour +
 		time.Duration(local.Minute())*time.Minute
+
+	// Dia fechado: a reserva nem começa a ser considerada. Esta é a metade que
+	// torna "dia de funcionamento" real — sem ela, o backend aceitaria reserva num
+	// dia que a UI mostra como fechado, e a config seria decorativa.
+	aberto, err := a.expediente.AbertoEm(ctx, local.Format(time.DateOnly))
+	if err != nil {
+		return err
+	}
+	if !aberto {
+		return invalido("O restaurante não abre em %s.", local.Format("02/01/2006"))
+	}
 
 	// Só o INÍCIO é checado. O término pode ultrapassar o fechamento — é a
 	// última mesa do dia, que senta às 22h30 e sai à meia-noite. Decisão
 	// registrada na validação #8 da spec.
-	if desdeMeiaNoite < a.hours.Start || desdeMeiaNoite >= a.hours.End {
+	if desdeMeiaNoite < hours.Start || desdeMeiaNoite >= hours.End {
 		return invalido(
 			"O restaurante atende das %s às %s. O horário solicitado (%s) está fora do expediente.",
-			formatarHora(a.hours.Start), formatarHora(a.hours.End), local.Format("15:04"),
+			formatarHora(hours.Start), formatarHora(hours.End), local.Format("15:04"),
 		)
 	}
 

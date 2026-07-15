@@ -48,16 +48,27 @@ type TableAvailability struct {
 }
 
 type Schedule struct {
-	repo  ScheduleReader
-	hours ServiceHours
+	repo       ScheduleReader
+	expediente ExpedienteVigente
 }
 
-func NewSchedule(repo ScheduleReader, hours ServiceHours) *Schedule {
-	return &Schedule{repo: repo, hours: hours}
+func NewSchedule(repo ScheduleReader, expediente ExpedienteVigente) *Schedule {
+	return &Schedule{repo: repo, expediente: expediente}
 }
 
 func (s *Schedule) FreeWindows(ctx context.Context, tableID uuid.UUID, dia string) ([]Window, error) {
-	expediente, err := s.expedienteDe(dia)
+	// Dia fechado: nenhuma janela livre, e nem vale ir buscar mesa ou ocupação. É a
+	// mesma resposta honesta da mesa inativa — a mesa existe, mas nenhuma hora dela
+	// é reservável naquele dia.
+	aberto, err := s.expediente.AbertoEm(ctx, dia)
+	if err != nil {
+		return nil, err
+	}
+	if !aberto {
+		return []Window{}, nil
+	}
+
+	expediente, err := s.expedienteDe(ctx, dia)
 	if err != nil {
 		return nil, err
 	}
@@ -69,9 +80,6 @@ func (s *Schedule) FreeWindows(ctx context.Context, tableID uuid.UUID, dia strin
 	if err != nil {
 		return nil, err
 	}
-	// Mesa inativa não tem janela livre — e isso é diferente de "não existe".
-	// Lista vazia é a resposta honesta: a mesa existe, e nenhuma hora dela é
-	// reservável.
 	if !mesa.IsActive {
 		return []Window{}, nil
 	}
@@ -99,7 +107,17 @@ func (s *Schedule) FreeWindows(ctx context.Context, tableID uuid.UUID, dia strin
 // contenção sobre estas janelas — três linhas de filtro, não um algoritmo. A
 // única lógica de domínio de verdade do projeto continua morando num lugar só.
 func (s *Schedule) DayGrid(ctx context.Context, dia string) ([]TableAvailability, error) {
-	expediente, err := s.expedienteDe(dia)
+	// Dia fechado: grade vazia. O staff vê que não há o que reservar, e o cliente
+	// não recebe uma mesa "livre" num dia em que a casa não abre.
+	aberto, err := s.expediente.AbertoEm(ctx, dia)
+	if err != nil {
+		return nil, err
+	}
+	if !aberto {
+		return []TableAvailability{}, nil
+	}
+
+	expediente, err := s.expedienteDe(ctx, dia)
 	if err != nil {
 		return nil, err
 	}
@@ -136,15 +154,20 @@ func (s *Schedule) DayGrid(ctx context.Context, dia string) ([]TableAvailability
 // ParseInLocation, e não Parse: o Parse interpretaria a data em UTC, e a janela
 // sairia deslocada em três horas. É a mesma armadilha do ?date= e da validação
 // de expediente — a terceira vez que ela aparece, sempre disfarçada.
-func (s *Schedule) expedienteDe(dia string) (Window, error) {
-	d, err := time.ParseInLocation(time.DateOnly, dia, s.hours.TZ)
+func (s *Schedule) expedienteDe(ctx context.Context, dia string) (Window, error) {
+	hours, err := s.expediente.HorasVigentes(ctx)
+	if err != nil {
+		return Window{}, err
+	}
+
+	d, err := time.ParseInLocation(time.DateOnly, dia, hours.TZ)
 	if err != nil {
 		return Window{}, invalido("Parâmetro 'date' deve estar no formato AAAA-MM-DD.")
 	}
 
 	return Window{
-		StartsAt: d.Add(s.hours.Start),
-		EndsAt:   d.Add(s.hours.End),
+		StartsAt: d.Add(hours.Start),
+		EndsAt:   d.Add(hours.End),
 	}, nil
 }
 

@@ -12,13 +12,14 @@ import (
 	"reservas-restaurante/internal/config"
 	"reservas-restaurante/internal/httpx"
 	"reservas-restaurante/internal/reservation"
+	"reservas-restaurante/internal/settings"
 	"reservas-restaurante/internal/table"
 )
 
 const maxBodyBytes = 1 << 20 // 1 MiB
 
 // New monta as rotas e devolve o handler raiz já embrulhado nas middlewares.
-func New(cfg config.Config, tables *table.Handler, reservations *reservation.Handler) http.Handler {
+func New(cfg config.Config, tables *table.Handler, reservations *reservation.Handler, cfgRest *settings.Handler) http.Handler {
 	mux := http.NewServeMux()
 
 	// Método e caminho na mesma string — recurso do ServeMux desde o Go 1.22.
@@ -46,9 +47,13 @@ func New(cfg config.Config, tables *table.Handler, reservations *reservation.Han
 	mux.HandleFunc("PATCH /reservations/{id}", reservations.Update)
 	mux.HandleFunc("DELETE /reservations/{id}", reservations.Delete)
 
-	// O expediente é a única parte da config que sai pela API: o frontend precisa
-	// dele para desenhar a grade do dia e para não oferecer horário fechado.
-	mux.HandleFunc("GET /service-hours", serviceHours(cfg))
+	// O expediente e os dias de funcionamento: config editável do restaurante
+	// (settings). O GET substitui o antigo servicehours.go que lia a Config; agora
+	// vem do banco e é editável.
+	mux.HandleFunc("GET /service-hours", cfgRest.Get)
+	mux.HandleFunc("PUT /service-hours", cfgRest.Update)
+	mux.HandleFunc("POST /service-exceptions", cfgRest.SaveException)
+	mux.HandleFunc("DELETE /service-exceptions/{day}", cfgRest.DeleteException)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})

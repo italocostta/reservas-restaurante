@@ -103,8 +103,18 @@ export interface TableAvailability {
   free_windows: Window[]
 }
 
+/** Uma data que foge da regra semanal: fechada num dia aberto, ou vice-versa. */
+export interface ServiceException {
+  /** AAAA-MM-DD */
+  day: DateOnly
+  is_open: boolean
+  note: string
+}
+
 /**
- * Expediente do restaurante, vindo de GET /service-hours.
+ * Expediente e dias de funcionamento, vindo de GET /service-hours. Editável desde
+ * a migration 0009 — o backend RESPEITA (recusa reserva em dia fechado), não só
+ * exibe.
  *
  * NÃO duplicar isto num .env do Vue. O endpoint existe exatamente para que esta
  * verdade viva num lugar só — ver seção 15 da spec.
@@ -116,4 +126,15 @@ export interface ServiceHours {
   end: string
   /** "America/Sao_Paulo" */
   tz: string
+  /** Dias da semana em que abre. 0=domingo … 6=sábado (convenção do Date.getDay). */
+  open_weekdays: number[]
+  exceptions: ServiceException[]
+}
+
+/** Corpo do PUT /service-hours. Sem as exceções — elas têm endpoints próprios. */
+export interface UpdateServiceHoursInput {
+  start: string
+  end: string
+  tz: string
+  open_weekdays: number[]
 }

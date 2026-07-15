@@ -1,6 +1,7 @@
 package reservation
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -107,13 +108,9 @@ func TestJanelasLivres(t *testing.T) {
 // Expediente calculado a partir da data + ServiceHours. ParseInLocation é o que
 // impede o dia de nascer três horas deslocado.
 func TestExpedienteDe(t *testing.T) {
-	s := NewSchedule(nil, ServiceHours{
-		Start: 18 * time.Hour,
-		End:   23 * time.Hour,
-		TZ:    fusoSP,
-	})
+	s := NewSchedule(nil, expedientePadrao())
 
-	exp, err := s.expedienteDe("2026-07-20")
+	exp, err := s.expedienteDe(context.Background(), "2026-07-20")
 	if err != nil {
 		t.Fatalf("erro = %v, quero sucesso", err)
 	}
@@ -121,7 +118,7 @@ func TestExpedienteDe(t *testing.T) {
 		t.Errorf("expediente = %s, quero 18:00–23:00 no fuso de SP", fmtJanela(exp))
 	}
 
-	_, err = s.expedienteDe("20/07/2026")
+	_, err = s.expedienteDe(context.Background(), "20/07/2026")
 	var ve ValidationError
 	if !errors.As(err, &ve) {
 		t.Errorf("formato inválido devolveu %v (%T), quero ValidationError", err, err)

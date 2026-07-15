@@ -44,16 +44,19 @@ export const useExpedienteStore = defineStore('expediente', () => {
   const pronto = computed(() => horas.value !== null)
 
   /**
-   * Idempotente: chamar de novo não refaz a requisição. O expediente não muda
-   * durante a sessão, e cada tela que precisar dele vai chamar isto no onMounted
-   * sem saber se outra já chamou.
+   * Idempotente: chamar de novo não refaz a requisição. O expediente muda raramente
+   * (só quando o staff edita), e cada tela chama isto no onMounted sem saber se
+   * outra já chamou. Depois de uma edição, use recarregar().
    */
   async function carregar() {
     if (horas.value || carregando.value) return
+    await recarregar()
+  }
 
+  /** Força o refetch — depois de editar horário, dias ou exceções. */
+  async function recarregar() {
     carregando.value = true
     erro.value = null
-
     try {
       horas.value = await api.serviceHours()
     } catch (e) {
@@ -63,5 +66,61 @@ export const useExpedienteStore = defineStore('expediente', () => {
     }
   }
 
-  return { horas, carregando, erro, tz, aberturaMin, fechamentoMin, pronto, carregar }
+  /**
+   * O restaurante abre nesta data? É uma DICA de UI — o backend é a autoridade
+   * (recusa reserva em dia fechado). Existe para a agenda mostrar "Fechado"
+   * explicitamente, em vez de uma grade vazia que parece "sem mesas".
+   *
+   * O dia da semana vem de meio-dia UTC: a data "2026-08-03" é segunda-feira
+   * independentemente de fuso, e o meio-dia evita qualquer rollover de data.
+   * getUTCDay devolve 0=domingo … 6=sábado, a mesma convenção do open_weekdays.
+   */
+  function diaAberto(dia: string): boolean {
+    if (!horas.value) return true // enquanto carrega, não afirma "fechado"
+
+    const ex = horas.value.exceptions.find((e) => e.day === dia)
+    if (ex) return ex.is_open
+
+    const weekday = new Date(`${dia}T12:00:00Z`).getUTCDay()
+    return horas.value.open_weekdays.includes(weekday)
+  }
+
+  async function salvarHoras(input: {
+    start: string
+    end: string
+    tz: string
+    open_weekdays: number[]
+  }): Promise<void> {
+    horas.value = await api.updateServiceHours(input)
+  }
+
+  async function salvarExcecao(ex: {
+    day: string
+    is_open: boolean
+    note: string
+  }): Promise<void> {
+    await api.saveException(ex)
+    await recarregar()
+  }
+
+  async function removerExcecao(day: string): Promise<void> {
+    await api.deleteException(day)
+    await recarregar()
+  }
+
+  return {
+    horas,
+    carregando,
+    erro,
+    tz,
+    aberturaMin,
+    fechamentoMin,
+    pronto,
+    carregar,
+    recarregar,
+    diaAberto,
+    salvarHoras,
+    salvarExcecao,
+    removerExcecao,
+  }
 })

@@ -81,6 +81,12 @@ func horasDeTeste() ServiceHours {
 	return ServiceHours{Start: 18 * time.Hour, End: 23 * time.Hour, TZ: fusoSP}
 }
 
+// expedienteDeTeste envolve horasDeTeste num provedor sempre-aberto, para os
+// testes de concorrência não dependerem de dia da semana.
+func expedienteDeTeste() ExpedienteVigente {
+	return fakeExpediente{horas: horasDeTeste()}
+}
+
 // Janela sempre no futuro (a validação #3 rejeita passado) e sempre dentro do
 // expediente (validação #8): 19h, daqui a 30 dias, no fuso do restaurante.
 func janelaFutura() (time.Time, time.Time) {
@@ -141,7 +147,7 @@ func TestConcorrenciaCaminhoAutomatico(t *testing.T) {
 	tableID := mesaDeTeste(t, pool)
 
 	repo := NewPostgresRepo(pool, fusoSP)
-	alloc := NewAllocator(repo, repo, repo, horasDeTeste(), SystemClock{})
+	alloc := NewAllocator(repo, repo, repo, expedienteDeTeste(), SystemClock{})
 	inicio, fim := janelaFutura()
 
 	const n = 10
@@ -171,7 +177,7 @@ func TestConcorrenciaCaminhoManual(t *testing.T) {
 	tableID := mesaDeTeste(t, pool)
 
 	repo := NewPostgresRepo(pool, fusoSP)
-	alloc := NewAllocator(repo, repo, repo, horasDeTeste(), SystemClock{})
+	alloc := NewAllocator(repo, repo, repo, expedienteDeTeste(), SystemClock{})
 	inicio, fim := janelaFutura()
 
 	const n = 10

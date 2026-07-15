@@ -85,6 +85,29 @@ type fakeClock struct{ agora time.Time }
 
 func (c fakeClock) Now() time.Time { return c.agora }
 
+// fakeExpediente satisfaz ExpedienteVigente com horas fixas. Por padrão, SEMPRE
+// aberto — os testes de alocação não são sobre dia fechado. Um teste que precise
+// de dia fechado troca abertoFn.
+type fakeExpediente struct {
+	horas    ServiceHours
+	abertoFn func(dia string) (bool, error)
+}
+
+func (f fakeExpediente) HorasVigentes(context.Context) (ServiceHours, error) {
+	return f.horas, nil
+}
+
+func (f fakeExpediente) AbertoEm(_ context.Context, dia string) (bool, error) {
+	if f.abertoFn != nil {
+		return f.abertoFn(dia)
+	}
+	return true, nil
+}
+
+func expedientePadrao() fakeExpediente {
+	return fakeExpediente{horas: ServiceHours{Start: 18 * time.Hour, End: 23 * time.Hour, TZ: fusoSP}}
+}
+
 // ---------- cenário ----------
 
 var fusoSP = mustLoadTZ("America/Sao_Paulo")
@@ -113,11 +136,7 @@ func novoAllocator(f *fakeFinder, c *fakeCreator) *Allocator {
 // comReplacer monta um Allocator com um replacer explícito, para os testes de
 // edição. Os de criação usam novoAllocator, que injeta o replacerProibido.
 func comReplacer(f *fakeFinder, c *fakeCreator, r ReservationReplacer) *Allocator {
-	return NewAllocator(f, c, r, ServiceHours{
-		Start: 18 * time.Hour,
-		End:   23 * time.Hour,
-		TZ:    fusoSP,
-	}, fakeClock{agora})
+	return NewAllocator(f, c, r, expedientePadrao(), fakeClock{agora})
 }
 
 func pedido() AllocationRequest {
@@ -605,6 +624,34 @@ func TestUpdateValidaAntesDeTocarNoRepo(t *testing.T) {
 	}
 	if repl.calls != 0 {
 		t.Error("Replace foi chamado apesar do pedido inválido")
+	}
+}
+
+// ---------- dia fechado (expediente editável) ----------
+
+// A metade que torna "dia de funcionamento" real: reservar num dia fechado é
+// recusado ANTES de qualquer I/O de mesa. Sem isto, o backend aceitaria uma
+// reserva num dia que a UI mostra como fechado, e a config seria decorativa.
+func TestReservaEmDiaFechadoEBarrada(t *testing.T) {
+	finder := &fakeFinder{}
+	creator := &fakeCreator{insertFn: func(context.Context, Reservation) (Reservation, error) {
+		panic("Insert não deve ser chamado num dia fechado")
+	}}
+
+	exp := fakeExpediente{
+		horas:    ServiceHours{Start: 18 * time.Hour, End: 23 * time.Hour, TZ: fusoSP},
+		abertoFn: func(string) (bool, error) { return false, nil }, // fechado sempre
+	}
+	alloc := NewAllocator(finder, creator, replacerProibido{}, exp, fakeClock{agora})
+
+	_, err := alloc.CreateReservation(context.Background(), pedido())
+
+	var ve ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("erro = %v (%T), quero ValidationError de dia fechado", err, err)
+	}
+	if finder.findCalls != 0 || finder.getCalls != 0 {
+		t.Error("o dia fechado deveria barrar antes de qualquer consulta de mesa")
 	}
 }
 

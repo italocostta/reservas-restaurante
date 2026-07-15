@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  existeMesaUnicaLivre,
   limitesDaRegua,
   livreEm,
   livreParaReserva,
@@ -140,6 +141,41 @@ describe('montarGrade — espalha a reserva pelas mesas que ela ocupa', () => {
       DIA,
     )
     expect(grade[0].blocos.map((b) => b.reserva.id)).toEqual(['cedo', 'tarde'])
+  })
+})
+
+describe('existeMesaUnicaLivre — combinar só quando nenhuma mesa única serve', () => {
+  const fechamento = em('23:00')
+  const inicio = em('19:00')
+  const fim = em('21:00')
+
+  const salao = [
+    mesa('a', 'Mesa 01', 2, [['18:00', '23:00']]),
+    mesa('b', 'Mesa 02', 2, [['18:00', '23:00']]),
+    mesa('c', 'Mesa 04', 4, [['18:00', '23:00']]),
+  ]
+
+  it('grupo de 4 com uma mesa de 4 livre → existe única (bloqueia combinação)', () => {
+    expect(existeMesaUnicaLivre(salao, 4, inicio, fim, fechamento)).toBe(true)
+  })
+
+  it('grupo de 4 com a mesa de 4 OCUPADA no horário → não existe única (permite combinar)', () => {
+    // Mesa 04 ocupada 19–21; as de 2 continuam livres. Combinar volta a ser válido:
+    // é a Fase 3a "parando de dizer não" a um grupo que a casa consegue sentar.
+    const comQuatroOcupada = [
+      mesa('a', 'Mesa 01', 2, [['18:00', '23:00']]),
+      mesa('b', 'Mesa 02', 2, [['18:00', '23:00']]),
+      mesa('c', 'Mesa 04', 4, [['18:00', '19:00'], ['21:00', '23:00']]), // ocupada 19–21
+    ]
+    expect(existeMesaUnicaLivre(comQuatroOcupada, 4, inicio, fim, fechamento)).toBe(false)
+  })
+
+  it('grupo de 10, maior mesa é 4 → não existe única (combinação necessária)', () => {
+    expect(existeMesaUnicaLivre(salao, 10, inicio, fim, fechamento)).toBe(false)
+  })
+
+  it('grupo de 2 → a própria mesa de 2 serve', () => {
+    expect(existeMesaUnicaLivre(salao, 2, inicio, fim, fechamento)).toBe(true)
   })
 })
 

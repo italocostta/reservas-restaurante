@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 
 import { mensagemLegivel } from '@/api/errors'
-import { livreParaReserva, maiorCapacidade, sugerirCombinacao } from '@/lib/grade'
+import { existeMesaUnicaLivre, livreParaReserva, maiorCapacidade, sugerirCombinacao } from '@/lib/grade'
 import { formatarTelefone, soDigitos } from '@/lib/telefone'
 import { hhmmParaMinutos, horaLocal, instanteDe, minutosParaHHMM } from '@/lib/tempo'
 import { useAgendaStore } from '@/stores/agenda'
@@ -125,6 +125,35 @@ const lugaresSelecionados = computed(() =>
 
 const combinando = computed(() => selecionadas.value.length > 1)
 
+/**
+ * Existe uma mesa única livre que comporta o grupo neste horário? Se sim, combinar
+ * é desperdício e fica BLOQUEADO (pedido do restaurante): usar duas mesas de 2 para
+ * um grupo de 4 quando há uma de 4 livre. A lógica e o porquê vivem em lib/grade.ts.
+ */
+const temMesaUnica = computed(
+  () =>
+    pessoas.value !== null &&
+    instanteInicio.value !== '' &&
+    existeMesaUnicaLivre(
+      props.disponibilidade,
+      pessoas.value,
+      instanteInicio.value,
+      instanteFimReal.value,
+      instanteFechamento.value,
+    ),
+)
+
+/** Combinar (marcar 2+ mesas) só é permitido quando nenhuma mesa única serve. */
+const podeCombinar = computed(() => !temMesaUnica.value)
+
+// Se a regra mudar (o staff aumentou o grupo, ou mudou o horário e liberou uma
+// mesa única), uma combinação já marcada deixa de ser válida — apara para uma só.
+watch(podeCombinar, (pode) => {
+  if (!pode && selecionadas.value.length > 1) {
+    selecionadas.value = selecionadas.value.slice(0, 1)
+  }
+})
+
 /** O teto do modo automático. A lógica e o porquê vivem em lib/grade.ts. */
 const maiorMesa = computed(() => maiorCapacidade(props.disponibilidade))
 
@@ -151,8 +180,17 @@ const cabe = computed(
 
 function alternar(id: UUID) {
   const i = selecionadas.value.indexOf(id)
-  if (i === -1) selecionadas.value.push(id)
-  else selecionadas.value.splice(i, 1)
+  if (i !== -1) {
+    selecionadas.value.splice(i, 1)
+    return
+  }
+  // Quando não pode combinar (há mesa única que serve), a seleção é de UMA mesa:
+  // marcar outra troca, não soma. O checkbox se comporta como radio.
+  if (!podeCombinar.value) {
+    selecionadas.value = [id]
+    return
+  }
+  selecionadas.value.push(id)
 }
 
 /** Empurra para o manual com as maiores mesas já marcadas. Lógica em lib/grade.ts. */
@@ -231,6 +269,12 @@ async function salvar() {
   // automático em silêncio.
   if (modo.value === 'manual' && selecionadas.value.length === 0) {
     erro.value = 'Marque ao menos uma mesa, ou volte para o modo automático.'
+    return
+  }
+  // Guarda defensiva: o alternar já impede marcar 2+ quando há mesa única, mas se
+  // por algum caminho a seleção tiver uma combinação onde uma mesa serve, recusa.
+  if (modo.value === 'manual' && selecionadas.value.length > 1 && !podeCombinar.value) {
+    erro.value = 'Uma mesa única comporta este grupo — não combine mesas à toa.'
     return
   }
   // Grupo maior que qualquer mesa, no automático, é 409 garantido — e a mensagem
@@ -430,6 +474,17 @@ async function salvar() {
 
         <!-- SELEÇÃO DE MESAS. Marcar duas ou mais É a combinação. -->
         <div v-if="modo === 'manual'" class="space-y-2">
+          <!-- Quando há mesa única que serve, combinar é bloqueado (pedido do
+               restaurante): a seleção vira de uma mesa só. O aviso explica por quê,
+               senão o staff acha que o checkbox está quebrado. -->
+          <p
+            v-if="!podeCombinar"
+            class="border-ink-700 text-ink-500 border-l-2 pl-3 text-xs"
+          >
+            Uma mesa única comporta este grupo — escolha uma.
+            <strong class="text-ink-400">Combinar só quando nenhuma mesa serve sozinha.</strong>
+          </p>
+
           <div class="border-ink-800 max-h-52 divide-y divide-ink-800 overflow-y-auto border">
             <label
               v-for="m in disponibilidade"

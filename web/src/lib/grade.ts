@@ -103,6 +103,29 @@ export function livreParaReserva(
 }
 
 /**
+ * Existe UMA mesa livre que sozinha comporta o grupo, no intervalo pedido?
+ *
+ * É o que decide se combinar faz sentido. Combinar duas mesas de 2 para um grupo
+ * de 4 é desperdício quando há uma mesa de 4 livre — a combinação (Fase 3a) existe
+ * para grupos que NENHUMA mesa única comporta, não para substituir uma que serve.
+ *
+ * Olha a disponibilidade, não só a capacidade: se todas as mesas grandes estão
+ * ocupadas, combinar duas pequenas volta a ser válido. Bloquear por capacidade
+ * pura reintroduziria o "não" falso que a Fase 3a existe para eliminar.
+ */
+export function existeMesaUnicaLivre(
+  disponibilidade: TableAvailability[],
+  pessoas: number,
+  inicio: Timestamp,
+  fim: Timestamp,
+  fechamento: Timestamp,
+): boolean {
+  return disponibilidade.some(
+    (m) => m.capacity >= pessoas && livreParaReserva(m, inicio, fim, fechamento),
+  )
+}
+
+/**
  * A maior capacidade individual do salão — o teto do modo automático.
  *
  * A heurística gulosa (seção 4) procura a menor mesa que comporte o grupo INTEIRO

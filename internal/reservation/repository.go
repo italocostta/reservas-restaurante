@@ -29,12 +29,22 @@ const pgCodeExclusionViolation = "23P01"
 type PostgresRepo struct {
 	db *pgxpool.Pool
 
-	// Nome IANA do fuso do restaurante ("America/Sao_Paulo"). Necessário porque
-	// timestamptz guarda um INSTANTE, não uma hora local: a reserva das 22h de
-	// sábado em SP está gravada como domingo 01h UTC. Filtrar por "o dia" sem
-	// converter para o fuso do restaurante devolve o dia errado.
+	// serviceTZ era o fuso do restaurante capturado no boot (do cfg.ServiceTZ).
+	// DEIXOU de ser a fonte do fuso nas queries: cada SELECT que precisa do fuso lê
+	// o vigente do banco via tzVigenteSQL, para não ficar stale quando o staff edita
+	// o fuso pelo PUT /service-hours (era o débito #18). Mantido no struct e no
+	// construtor de propósito — removê-lo mudaria a assinatura do NewPostgresRepo e
+	// obrigaria a mexer no main.go e nos testes por um campo que hoje ninguém lê.
 	serviceTZ string
 }
+
+// tzVigenteSQL é o fuso do restaurante lido do banco A CADA query, e não o
+// serviceTZ fixo do boot. É um acoplamento de SQL assumido: reservation lê
+// restaurant_settings (tabela do domínio settings) para um único escalar. No grafo
+// de imports do Go nada muda — reservation continua sem importar settings —; no
+// banco, os dois domínios já compartilham o mesmo Postgres. É o preço de o fuso ser
+// sempre o vigente sem passar por uma interface a cada linha de SQL.
+const tzVigenteSQL = `(SELECT service_tz FROM restaurant_settings WHERE id = 1)`
 
 func NewPostgresRepo(db *pgxpool.Pool, serviceTZ *time.Location) *PostgresRepo {
 	return &PostgresRepo{db: db, serviceTZ: serviceTZ.String()}
@@ -375,7 +385,7 @@ type ListFilter struct {
 // perceberia, porque ela é plausível. O EXISTS filtra QUAIS RESERVAS aparecem sem
 // mexer em QUAIS MESAS cada uma reporta.
 const listSQL = selectReservas + `
-WHERE ($1::date IS NULL OR (r.starts_at AT TIME ZONE $4)::date = $1::date)
+WHERE ($1::date IS NULL OR (r.starts_at AT TIME ZONE ` + tzVigenteSQL + `)::date = $1::date)
   AND ($2::uuid IS NULL OR EXISTS (
         SELECT 1 FROM reservation_tables f
         WHERE f.reservation_id = r.id AND f.table_id = $2))
@@ -384,7 +394,7 @@ GROUP BY r.id
 ORDER BY r.starts_at`
 
 func (r *PostgresRepo) List(ctx context.Context, f ListFilter) ([]Reservation, error) {
-	rows, err := r.db.Query(ctx, listSQL, f.Date, f.TableID, f.Status, r.serviceTZ)
+	rows, err := r.db.Query(ctx, listSQL, f.Date, f.TableID, f.Status)
 	if err != nil {
 		return nil, fmt.Errorf("listando reservas: %w", err)
 	}
@@ -542,12 +552,13 @@ func (r *PostgresRepo) BusyWindowsAll(ctx context.Context, from, to time.Time) (
 // de entrada do usuário — é uma leitura do estado do mundo, e o relógio do mundo é
 // o do banco.
 // Devolve a contagem E a data da próxima (a menor starts_at), já formatada no fuso
-// do restaurante ($2). O to_char no banco evita trazer o timestamptz cru só para
-// formatá-lo em Go — e o AT TIME ZONE garante que "17/07" seja o dia de PAREDE do
-// restaurante, não do UTC. coalesce cobre o count=0 (min de nada é NULL).
+// VIGENTE do restaurante (tzVigenteSQL, lido do banco — não mais o serviceTZ do
+// boot, que ficava stale). O to_char no banco evita trazer o timestamptz cru só
+// para formatá-lo em Go — e o AT TIME ZONE garante que "17/07" seja o dia de PAREDE
+// do restaurante, não do UTC. coalesce cobre o count=0 (min de nada é NULL).
 const contarReservasFuturasSQL = `
 SELECT count(*),
-       coalesce(to_char(min(starts_at) AT TIME ZONE $2, 'DD/MM/YYYY'), '')
+       coalesce(to_char(min(starts_at) AT TIME ZONE ` + tzVigenteSQL + `, 'DD/MM/YYYY'), '')
 FROM reservation_tables
 WHERE table_id = $1
   AND status = 'confirmed'
@@ -568,7 +579,7 @@ func (r *PostgresRepo) ContarReservasFuturas(ctx context.Context, tableID uuid.U
 	var n int
 	var proxima string
 
-	if err := r.db.QueryRow(ctx, contarReservasFuturasSQL, tableID, r.serviceTZ).Scan(&n, &proxima); err != nil {
+	if err := r.db.QueryRow(ctx, contarReservasFuturasSQL, tableID).Scan(&n, &proxima); err != nil {
 		return 0, "", fmt.Errorf("contando reservas futuras da mesa %s: %w", tableID, err)
 	}
 
@@ -632,20 +643,20 @@ func (r *PostgresRepo) ContarReservasForaDoExpediente(ctx context.Context, novo 
 // INTEIRO, então qualquer reserva confirmed naquele dia de parede conflita — é o
 // análogo da desativação de mesa, onde a coisa toda some. Basta o dia bater.
 //
-// O dia de parede é `(starts_at AT TIME ZONE $2)::date`: o instante 01:00 UTC é
+// O dia de parede é `(starts_at AT TIME ZONE <tz>)::date`: o instante 01:00 UTC é
 // 22:00 do dia anterior em SP, e é o dia de PAREDE do restaurante que a exceção
-// fecha. Usa r.serviceTZ, e portanto herda o débito #18 (fuso fixo do boot fica
-// stale se o TZ for editado) — mesma limitação da ContarReservasFuturas da mesa.
+// fecha. O fuso vem de tzVigenteSQL (lido do banco a cada query), não mais do
+// serviceTZ do boot — então esta contagem já NÃO herda o débito #18.
 //
 // `ends_at > now()`: só reservas com efeito futuro/em curso importam, igual às
 // outras duas contagens.
 const contarReservasNoDiaSQL = `
 SELECT count(*),
-       coalesce(to_char(min(starts_at) AT TIME ZONE $2, 'DD/MM/YYYY HH24hMI'), '')
+       coalesce(to_char(min(starts_at) AT TIME ZONE ` + tzVigenteSQL + `, 'DD/MM/YYYY HH24hMI'), '')
 FROM reservations
 WHERE status = 'confirmed'
   AND ends_at > now()
-  AND (starts_at AT TIME ZONE $2)::date = $1::date`
+  AND (starts_at AT TIME ZONE ` + tzVigenteSQL + `)::date = $1::date`
 
 // ContarReservasNoDia responde a pergunta que o POST /service-exceptions precisa
 // fazer antes de fechar uma data: "quantas reservas confirmed caem neste dia, e
@@ -655,7 +666,7 @@ func (r *PostgresRepo) ContarReservasNoDia(ctx context.Context, dia string) (int
 	var n int
 	var proxima string
 
-	if err := r.db.QueryRow(ctx, contarReservasNoDiaSQL, dia, r.serviceTZ).Scan(&n, &proxima); err != nil {
+	if err := r.db.QueryRow(ctx, contarReservasNoDiaSQL, dia).Scan(&n, &proxima); err != nil {
 		return 0, "", fmt.Errorf("contando reservas no dia %s: %w", dia, err)
 	}
 

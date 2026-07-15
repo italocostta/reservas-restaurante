@@ -409,6 +409,12 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/httpx.ErrorResponse"
                         }
+                    },
+                    "409": {
+                        "description": "O novo expediente deixaria reservas confirmadas fora do horário",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
                     }
                 }
             }

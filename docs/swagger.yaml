@@ -493,6 +493,10 @@ paths:
           description: Horário/fuso inválido, ou fim não é depois do início
           schema:
             $ref: '#/definitions/httpx.ErrorResponse'
+        "409":
+          description: O novo expediente deixaria reservas confirmadas fora do horário
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
       summary: Altera o expediente e os dias de funcionamento
       tags:
       - restaurante

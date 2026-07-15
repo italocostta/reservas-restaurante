@@ -26,6 +26,14 @@ func (f *fakeRepo) ListExcecoes(context.Context) ([]Exception, error) { return f
 func (f *fakeRepo) SaveExcecao(context.Context, Exception) error      { return nil }
 func (f *fakeRepo) DeleteExcecao(context.Context, string) error       { return nil }
 
+// fakeAgenda satisfaz a interface `agenda` do handler. Zero conflitos: o PUT do
+// contrato exercita o caminho feliz (200), não o 409.
+type fakeAgenda struct{}
+
+func (fakeAgenda) ContarReservasForaDoExpediente(context.Context, reservation.ServiceHours, []int) (int, string, error) {
+	return 0, "", nil
+}
+
 func repoPadrao(t *testing.T) *fakeRepo {
 	t.Helper()
 	tz, err := time.LoadLocation("America/Sao_Paulo")
@@ -73,7 +81,7 @@ func TestSettingsBateComOSwagger(t *testing.T) {
 	for _, tc := range casos {
 		t.Run(tc.nome, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			tc.chama(NewHandler(repoPadrao(t)), rec, tc.req)
+			tc.chama(NewHandler(repoPadrao(t), fakeAgenda{}), rec, tc.req)
 			openapitest.RequireInContract(t, spec, tc.metodo, tc.rota, rec)
 		})
 	}

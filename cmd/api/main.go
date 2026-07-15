@@ -90,8 +90,15 @@ func run() error {
 	// A config editável do restaurante (migration 0009). O settingsRepo satisfaz a
 	// reservation.ExpedienteVigente — é por ele que o horário e os dias de
 	// funcionamento gravados no banco chegam ao allocator e à agenda, dinamicamente.
+	//
+	// reservationRepo entra AQUI de novo, atravessando a fronteira no sentido
+	// settings → reservation (o quinto uso da mesma struct): antes de ENCOLHER o
+	// expediente, o settings.Handler precisa saber se sobraria reserva confirmed fora
+	// do novo horário. Ele declarou a interface `agenda` sem importar reservation, e
+	// o *reservation.PostgresRepo a satisfaz — o acoplamento mora neste argumento, à
+	// vista, do mesmo jeito que o do table.Handler logo acima.
 	settingsRepo := settings.NewPostgresRepo(pool)
-	settingsHandler := settings.NewHandler(settingsRepo)
+	settingsHandler := settings.NewHandler(settingsRepo, reservationRepo)
 
 	// O expediente NÃO vem mais da Config para o domínio: vem do settingsRepo, que
 	// lê a config editável do banco (migration 0009). Editar o horário passou a

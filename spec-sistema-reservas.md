@@ -664,6 +664,8 @@ Para não serem confundidas com esquecimento durante a implementação:
 14. **Nada valida adjacência física** (Fase 3a). O sistema aceita combinar a `Mesa 01` com a `Mesa 08` mesmo que estejam em salões opostos. É consequência direta de não construir a 3b: sem grafo de adjacência, não há o que validar. **Quem garante que as mesas encostam é o humano que as escolheu** — o que é aceitável exatamente porque a combinação é manual.
 15. **O caminho automático não combina** (Fase 3a). Um grupo de 10 sem `table_ids` informado ainda recebe `409`, mesmo com 6+4 livres. Combinar automaticamente é a Fase 3b, deliberadamente não construída (seção 14).
 16. **Tipos do domínio escritos à mão em TypeScript**, não gerados do `swagger.json` (seção 15). Gerar acoplaria o build do frontend ao `swag init` para 4 tipos — custa mais do que resolve. **É o mesmo *drift* de sempre, na terceira encarnação**: código → doc (resolvido pelo teste de contrato) → spec (não resolvido, ver seção 12) → agora TS. Aceito porque o teste de contrato protege o lado que importa — o servidor —, mas **nada impede o TS de divergir do Go**, e o compilador do Vue vai concordar alegremente com um campo que não existe mais.
+17. **`POST /service-exceptions` não checa reservas ao fechar uma data** (irmão do `PUT /service-hours`, seção 16). Marcar `2026-12-25` como `is_open=false` não olha se já existe reserva confirmed naquele dia: a mesma mentira silenciosa que a checagem do `PUT` passou a barrar — a reserva fica de pé enquanto a agenda passa a mostrar o dia como fechado. Não foi coberto na mesma rodada de propósito, para a correção do `PUT` ficar isolada e revisável; o padrão a replicar é o mesmo (contar confirmed no dia via exceção candidata, `409` se houver, `500` se a contagem falhar). **Relacionado:** seção 16.
+18. **`r.serviceTZ` do `reservation.PostgresRepo` é fixo no boot** (vem do `cfg.ServiceTZ`) e fica *stale* se o staff editar o fuso pelo `PUT /service-hours`. As queries que o usam (`ContarReservasFuturas` da mesa, o filtro do `?date=`) passam a ler o dia de parede num fuso que já não é o vigente. A `ContarReservasForaDoExpediente` (seção 16) já evita isso usando o TZ *candidato* do próprio PUT; as outras não foram migradas. Mudar de fuso é raro e as reservas guardam o instante correto (`timestamptz`), então o efeito é de rótulo, não de corrupção — por isso débito, não bug de corretude.
 
 > **Fechado:** o débito "`reservation/handler_test.go` não existe" foi resolvido. O arquivo cobre o parsing dos filtros (formato do `?date=`, enum do `?status=`, UUID do `?table_id=`), o `DisallowUnknownFields`, a conversão DTO→domínio (`table_id` ausente/null/informado), e — o mais importante — **o invariante do `ErrSlotTaken`**: se ele vazar do allocator, o handler devolve `500` com log de `INVARIANTE VIOLADO`, nunca um `409` disfarçado. Verificado que o teste falha ao mapear `ErrSlotTaken` para `409`, denunciando tanto o status errado quanto o vazamento da mensagem interna no corpo.
 
@@ -1056,6 +1058,47 @@ As duas tabelas novas entram com `ENABLE ROW LEVEL SECURITY` e zero policies (se
 ### O `down` que pode apagar sem medo
 
 Ao contrário dos `down` da 0006/0007 (Fase 3a), que falham de propósito para não perder reserva combinada, o `down` da 0009 derruba as duas tabelas direto. **A diferença é o tipo do dado:** `restaurant_settings` e `service_exceptions` são **config**, não histórico. O expediente volta a ser responsabilidade do `.env` — para onde o código revertido volta a olhar. Perder a config editada é reversível (reconfigura-se em segundos); perder uma reserva não é. O critério de "quando um `down` pode destruir" é o mesmo da Fase 3a, aplicado ao contrário.
+
+### O buraco que encolher o expediente abriu
+
+**Dava para encolher o expediente por cima de uma reserva confirmed.** O `PUT /service-hours` fazia um `UPDATE` incondicional em `restaurant_settings`: apertar a janela (`18h–23h → 19h–22h`) ou tirar um dia de `open_weekdays` não olhava as reservas. A reserva das 20h de uma segunda continuava `confirmed` no banco, intocada — mas a partir dali o `AbertoEm` respondia `false` para aquele horário, e a agenda passava a mostrar como fechado exatamente o slot onde havia gente marcada. É o **mesmo buraco que a desativação de mesa revelou** (seção 15, "o buraco que a primeira tela revelou"), do outro lado: lá a mesa sumia com a reserva de pé; aqui o horário some com a reserva de pé.
+
+#### O eixo da checagem é o `starts_at`, e isso não é escolha — é espelho
+
+A pergunta "esta reserva ficaria fora do novo expediente?" tem que ter **exatamente a mesma resposta** que o `allocator.validarPedido` dá ao criar a reserva, senão o sistema passa a ter duas definições de "dentro do expediente". E o `validarPedido` (seção 3, validação #8) checa **só o início**: aceita a reserva se o dia de `starts_at` está aberto E a hora de `starts_at` cai em `[start, end)`. O término pode ultrapassar o fechamento de propósito — é a última mesa do dia, que senta às 22h30 e sai à meia-noite.
+
+Logo a contagem do `PUT` é a **negação literal** desse aceite: dia fechado **OU** hora de início antes da abertura **OU** hora de início no/depois do fechamento. Checar `ends_at` teria parecido mais "seguro", mas inventaria uma regra que a criação de reserva não tem — e reprovaria no `PUT` uma reserva que o `POST` aceitaria alegremente. A checagem não pode ser mais rígida que a regra que ela protege.
+
+#### Onde a checagem mora, e por que não no `Save`
+
+No `settings.Handler.Update`, entre `montarSettings` e `repo.Save` — não dentro do `Save`. O `Save` continua um escritor sem opinião; quem sabe traduzir "há conflito" em `409` e "não consegui contar" em `500` é o handler. É a mesma divisão do `table.Handler` (seção 15): a checagem de negócio vive na borda HTTP, o repositório só persiste. Enfiar a contagem no `Save` obrigaria o repositório a devolver um erro tipado que o handler reinterpretaria — mais indireção para o mesmo efeito, e um `Save` que nenhum outro chamador poderia reusar sem herdar a regra.
+
+#### A interface atravessa a fronteira settings → reservation
+
+`settings` **não importa `reservation` por causa disto** — declara a pergunta e deixa o `main.go` costurar, como o `table` faz com a `agenda`:
+
+```go
+// settings/handler.go — a interface é declarada pelo consumidor
+type agenda interface {
+    ContarReservasForaDoExpediente(ctx context.Context, novo reservation.ServiceHours, diasAbertos []int) (int, string, error)
+}
+```
+
+O `*reservation.PostgresRepo` a satisfaz sem nunca ter ouvido falar dela. (O `reservation.ServiceHours` no tipo não é ciclo: `settings` **já** importa `reservation` para reusar `ServiceHours` — é o mesmo conceito de expediente —, e `reservation` continua sem conhecer `settings`.) O acoplamento mora num argumento de construtor no `main.go`, o quinto uso da mesma struct de reservas, à vista.
+
+#### Três decisões dentro da checagem, e uma que diverge da mesa
+
+1. **Consulta `reservations`, não `reservation_tables`.** A `ContarReservasFuturas` da mesa lia a tabela de junção porque uma mesa pode estar ocupada como *metade* de uma combinação. Aqui a unidade é a **reserva** e seu único `starts_at` — a junção não agregaria nada, e contá-la duplicaria a reserva combinada.
+2. **O fuso é o do expediente *candidato*, não o `r.serviceTZ` do boot.** O `PUT` pode estar justamente mudando o fuso; a pergunta é "sob o expediente **novo**, esta reserva fica fora?", então a hora de parede tem que ser lida no fuso novo. É onde esta checagem é *mais* correta que a da mesa, que ainda usa o `serviceTZ` fixo (débito #18, seção 8).
+3. **`ends_at > now()`, e falha na contagem vira `500`.** Só reservas com efeito futuro/em curso importam — uma que já terminou fora do novo horário não faz mal a ninguém. E um erro de banco na contagem significa *"não sei se pode"*: responder `409` ("não pode") seria mentir com confiança, então é `500`. As duas decisões são idênticas às da mesa (seção 15), pelas mesmas razões.
+
+#### A corrida que fica, e é aceita
+
+É um *check-then-act*: alguém pode criar uma reserva entre a contagem e o `UPDATE`. Como na desativação de mesa, **esta corrida não tem constraint no banco para ampará-la** — e a spec não finge que tem. Janela de milissegundos numa operação que o staff faz raramente, contra dano recuperável (reeditar o expediente). Aceito e registrado, não escondido — mesmo raciocínio do débito #7 (seção 8).
+
+#### O irmão que ficou de fora
+
+O `POST /service-exceptions` tem **o mesmo gap**: marcar uma data como fechada não checa reservas confirmed já existentes naquele dia. Não foi corrigido nesta rodada de propósito, para a correção do `PUT` ficar isolada e revisável. Está registrado como débito #17 (seção 8), com o padrão a replicar — não deixado por conta de quem ler o código depois descobrir sozinho.
 
 ### Nota de escopo — o que esta rodada NÃO cobriu
 

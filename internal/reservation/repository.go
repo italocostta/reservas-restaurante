@@ -575,6 +575,58 @@ func (r *PostgresRepo) ContarReservasFuturas(ctx context.Context, tableID uuid.U
 	return n, proxima, nil
 }
 
+// Espelha EXATAMENTE o critério do allocator.validarPedido: uma reserva "cabe" no
+// expediente quando o dia de starts_at está aberto E a hora de starts_at cai em
+// [start, end). Aqui perguntamos o inverso — quantas confirmed ficariam FORA de uma
+// janela candidata —, então a condição é a negação: dia fechado OU hora antes da
+// abertura OU hora no/depois do fechamento. Só o starts_at, nunca o ends_at: o
+// domínio deixa o término ultrapassar o fechamento de propósito (a última mesa do
+// dia), e checar ends_at inventaria uma regra que a criação de reserva não tem.
+//
+// Consulta `reservations`, e não `reservation_tables` (como a ContarReservasFuturas
+// da mesa): a unidade aqui é a RESERVA e seu único starts_at, não a ocupação de uma
+// mesa que pode ser metade de uma combinação.
+//
+// O fuso é o do expediente CANDIDATO (novo.TZ), não o r.serviceTZ do boot: o PUT
+// pode estar justamente mudando o fuso, e a pergunta é "sob o expediente novo, esta
+// reserva fica fora?" — logo a hora de parede tem que ser lida no fuso novo.
+//
+// `ends_at > now()`: mesma razão da mesa — só reservas com efeito futuro/em curso
+// importam; uma que já terminou fora do novo horário não faz mal a ninguém.
+const contarForaExpedienteSQL = `
+SELECT count(*),
+       coalesce(to_char(min(starts_at) AT TIME ZONE $1, 'DD/MM/YYYY HH24hMI'), '')
+FROM reservations
+WHERE status = 'confirmed'
+  AND ends_at > now()
+  AND (
+        EXTRACT(DOW FROM starts_at AT TIME ZONE $1)::int <> ALL($2::int[])
+     OR (starts_at AT TIME ZONE $1)::time <  $3::time
+     OR (starts_at AT TIME ZONE $1)::time >= $4::time
+  )`
+
+// ContarReservasForaDoExpediente responde a pergunta que o PUT /service-hours
+// precisa fazer antes de encolher o horário: "quantas reservas confirmed ficariam
+// fora desta janela candidata, e qual a mais próxima?". Mesma assimetria da mesa
+// (seção 15): `settings` declara a interface, este repo a satisfaz sem que
+// reservation conheça settings.
+func (r *PostgresRepo) ContarReservasForaDoExpediente(ctx context.Context, novo ServiceHours, diasAbertos []int) (int, string, error) {
+	var n int
+	var proxima string
+
+	err := r.db.QueryRow(ctx, contarForaExpedienteSQL,
+		novo.TZ.String(),
+		diasAbertos,
+		formatarHora(novo.Start),
+		formatarHora(novo.End),
+	).Scan(&n, &proxima)
+	if err != nil {
+		return 0, "", fmt.Errorf("contando reservas fora do expediente candidato: %w", err)
+	}
+
+	return n, proxima, nil
+}
+
 // Cancel é o soft delete: a linha fica, sai do índice parcial da EXCLUDE (que só
 // indexa status='confirmed') e libera o horário.
 //

@@ -46,7 +46,7 @@ var rotas = []struct {
 func routerDeTeste() http.Handler {
 	tables := table.NewHandler(nil, nil)
 	reservations := reservation.NewHandler(nil, nil, nil)
-	cfgRest := settings.NewHandler(nil)
+	cfgRest := settings.NewHandler(nil, nil)
 	cfg := config.Config{CORSAllowedOrigin: origemTeste}
 	return New(cfg, tables, reservations, cfgRest)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -22,12 +23,28 @@ type repository interface {
 	DeleteExcecao(ctx context.Context, dia string) error
 }
 
-type Handler struct {
-	repo repository
+// agenda é a única coisa que este pacote sabe sobre reservas, e repare que ele NÃO
+// importa reservation por causa dela: declara a PERGUNTA de que precisa e deixa o
+// main.go escolher quem responde. É a mesma assimetria do table/handler.go (seção
+// 15), atravessando a fronteira no sentido settings → reservation.
+//
+// A pergunta: "encolher o expediente para esta janela candidata deixaria quantas
+// reservas confirmed fora do horário?". Quem responde, sem nunca ter ouvido falar
+// desta interface, é o *reservation.PostgresRepo.
+type agenda interface {
+	// Devolve quantas reservas confirmed (com efeito futuro) cairiam FORA do
+	// expediente candidato — dia fechado ou hora de início fora de [start, end) — e
+	// a data/hora da mais próxima (DD/MM/YYYY HHhMM no fuso candidato; vazia se zero).
+	ContarReservasForaDoExpediente(ctx context.Context, novo reservation.ServiceHours, diasAbertos []int) (int, string, error)
 }
 
-func NewHandler(repo repository) *Handler {
-	return &Handler{repo: repo}
+type Handler struct {
+	repo   repository
+	agenda agenda
+}
+
+func NewHandler(repo repository, ag agenda) *Handler {
+	return &Handler{repo: repo, agenda: ag}
 }
 
 // SettingsResponse é o expediente do jeito que o frontend lê: horário como string,
@@ -108,6 +125,7 @@ func respostaDe(s Settings, excecoes []Exception) SettingsResponse {
 //	@Param			expediente	body		updateRequest	true	"Novo expediente"
 //	@Success		200			{object}	SettingsResponse
 //	@Failure		400			{object}	httpx.ErrorResponse	"Horário/fuso inválido, ou fim não é depois do início"
+//	@Failure		409			{object}	httpx.ErrorResponse	"O novo expediente deixaria reservas confirmadas fora do horário"
 //	@Router			/service-hours [put]
 func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	var req updateRequest
@@ -121,6 +139,33 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	s, err := montarSettings(req)
 	if err != nil {
 		responder(w, err, "validando expediente")
+		return
+	}
+
+	// ENCOLHER o expediente (tirar um dia de open_weekdays, ou apertar a janela de
+	// horas) não pode passar por cima de uma reserva confirmed que já está marcada
+	// exatamente no horário que deixaria de existir: a reserva continuaria de pé no
+	// banco enquanto a agenda passaria a tratar aquele horário como fechado. É o
+	// mesmo buraco da desativação de mesa (seção 15), do outro lado.
+	//
+	// Check-then-act, e portanto com corrida: uma reserva pode nascer entre a
+	// contagem e o Save. Assim como a checagem da mesa, esta corrida NÃO tem
+	// constraint no banco para ampará-la, e não vou fingir que tem — janela de
+	// milissegundos numa operação que o staff faz raramente, contra dano recuperável
+	// (reeditar o expediente). Aceito e registrado.
+	//
+	// Falha ao CONTAR vira 500, nunca 409: um erro de banco significa "não sei se
+	// pode", e responder "não pode" seria mentir com confiança (seção 15).
+	n, proxima, err := h.agenda.ContarReservasForaDoExpediente(r.Context(), s.Hours, diasAbertos(s.OpenWeekdays))
+	if err != nil {
+		slog.Error("contando reservas fora do expediente", "erro", err)
+		httpx.Error(w, http.StatusInternalServerError, "Erro interno.")
+		return
+	}
+	if n > 0 {
+		httpx.Error(w, http.StatusConflict, fmt.Sprintf(
+			"O novo expediente deixaria %s confirmada(s) fora do horário de funcionamento (a mais próxima em %s). Cancele-a(s) ou ajuste o expediente antes.",
+			pluralReservas(n), proxima))
 		return
 	}
 
@@ -252,6 +297,29 @@ func responder(w http.ResponseWriter, err error, contexto string) {
 	}
 	slog.Error(contexto, "erro", err)
 	httpx.Error(w, http.StatusInternalServerError, "Erro interno.")
+}
+
+// diasAbertos achata o map de dias abertos na lista de DOW que a query espera (a
+// mesma convenção 0=domingo do open_weekdays). O map é para consulta O(1); a query
+// quer o conjunto.
+func diasAbertos(m map[time.Weekday]bool) []int {
+	dias := make([]int, 0, len(m))
+	for d := time.Sunday; d <= time.Saturday; d++ {
+		if m[d] {
+			dias = append(dias, int(d))
+		}
+	}
+	return dias
+}
+
+// pluralReservas evita "1 reservas" na mensagem lida pelo staff — mesmo cuidado do
+// table/handler.go. Duplicado de propósito: importar table só por isto acoplaria
+// dois domínios por uma função de uma linha.
+func pluralReservas(n int) string {
+	if n == 1 {
+		return "1 reserva"
+	}
+	return fmt.Sprintf("%d reservas", n)
 }
 
 // parseHHMM converte "18:30" na duração desde a meia-noite. Duplicado do config de

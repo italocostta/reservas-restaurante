@@ -183,6 +183,7 @@ function abrirEdicao(reserva: Reservation) {
       :mesa-pre="mesaPre"
       :minutos-pre="minutosPre"
       :reserva-pre="reservaPre"
+      :fechamento="expediente.horas?.end ?? ''"
       @fechar="dialogoAberto = false"
       @salvo="dialogoAberto = false"
     />

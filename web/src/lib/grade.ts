@@ -75,6 +75,34 @@ export function livreEm(mesa: TableAvailability, inicio: Timestamp, fim: Timesta
 }
 
 /**
+ * A mesa comporta uma RESERVA de [inicio, fim), recortando o fim no fechamento?
+ *
+ * É o livreEm com uma correção que um bug real expôs: as janelas livres só
+ * descrevem [abertura, fechamento], mas uma reserva PODE terminar depois do
+ * fechamento — é a última mesa da noite (validação 8 da spec: começa 21:30, sai
+ * 23:30, com o restaurante fechando 23:00). Perguntar `livreEm` com o fim às 23:30
+ * não acha janela nenhuma (todas terminam 23:00) e marca TODA mesa como ocupada,
+ * inclusive as vazias.
+ *
+ * A parte da reserva DEPOIS do fechamento não é descrita pelas janelas livres, e
+ * o backend a aceita de qualquer forma (validação 8). Então a contenção só pode e
+ * só precisa ser checada até o fechamento — daí o recorte. `fechamento` vazio
+ * desliga o recorte (cai no livreEm puro).
+ */
+export function livreParaReserva(
+  mesa: TableAvailability,
+  inicio: Timestamp,
+  fim: Timestamp,
+  fechamento: Timestamp,
+): boolean {
+  let fimEfetivo = fim
+  if (fechamento && new Date(fim).getTime() > new Date(fechamento).getTime()) {
+    fimEfetivo = fechamento
+  }
+  return livreEm(mesa, inicio, fimEfetivo)
+}
+
+/**
  * A maior capacidade individual do salão — o teto do modo automático.
  *
  * A heurística gulosa (seção 4) procura a menor mesa que comporte o grupo INTEIRO

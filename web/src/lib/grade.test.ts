@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { limitesDaRegua, livreEm, maiorCapacidade, montarGrade, sugerirCombinacao } from './grade'
+import {
+  limitesDaRegua,
+  livreEm,
+  livreParaReserva,
+  maiorCapacidade,
+  montarGrade,
+  sugerirCombinacao,
+} from './grade'
 import { instanteDe } from './tempo'
 import type { Reservation, TableAvailability } from '@/types/api'
 
@@ -64,6 +71,33 @@ describe('livreEm — a contenção que substitui o sweep no cliente', () => {
 
   it('mesa sem nenhuma janela livre não cabe nada', () => {
     expect(livreEm(mesa('b', 'Mesa 05', 4, []), em('19:00'), em('20:00'))).toBe(false)
+  })
+})
+
+describe('livreParaReserva — recorta o fim no fechamento (regressão do bug de 21:30)', () => {
+  // Mesa vazia: livre o expediente inteiro, 18:00–23:00. Fecha às 23:00.
+  const vazia = mesa('v', 'Mesa 01', 2, [['18:00', '23:00']])
+  const fechamento = em('23:00')
+
+  it('reserva 21:30 com saída default 23:30 (passa do fechamento) → LIVRE', () => {
+    // O bug: sem o recorte, livreEm com fim 23:30 não acha janela (todas terminam
+    // 23:00) e marca a mesa vazia como ocupada. Com o recorte, [21:30, 23:00] cabe.
+    expect(livreParaReserva(vazia, em('21:30'), em('23:30'), fechamento)).toBe(true)
+  })
+
+  it('a mesma reserva SEM recorte (livreEm cru) falha — prova que o recorte é o que conserta', () => {
+    expect(livreEm(vazia, em('21:30'), em('23:30'))).toBe(false)
+  })
+
+  it('mesa ocupada perto do fechamento continua ocupada mesmo com recorte', () => {
+    // Mesa livre só até 22:00 (ocupada 22:00–23:00). Reserva 21:30–23:30 recortada
+    // para 21:30–23:00 ainda não cabe: a janela [18:00,22:00] termina antes.
+    const ocupadaTarde = mesa('o', 'Mesa 03', 4, [['18:00', '22:00']])
+    expect(livreParaReserva(ocupadaTarde, em('21:30'), em('23:30'), fechamento)).toBe(false)
+  })
+
+  it('reserva inteira dentro do expediente não muda de resposta', () => {
+    expect(livreParaReserva(vazia, em('19:00'), em('21:00'), fechamento)).toBe(true)
   })
 })
 

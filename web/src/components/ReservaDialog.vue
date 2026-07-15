@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 
 import { mensagemLegivel } from '@/api/errors'
-import { livreEm, maiorCapacidade, sugerirCombinacao } from '@/lib/grade'
+import { livreParaReserva, maiorCapacidade, sugerirCombinacao } from '@/lib/grade'
 import { formatarTelefone, soDigitos } from '@/lib/telefone'
 import { hhmmParaMinutos, horaLocal, instanteDe, minutosParaHHMM } from '@/lib/tempo'
 import { useAgendaStore } from '@/stores/agenda'
@@ -18,6 +18,8 @@ const props = defineProps<{
   minutosPre: number | null
   /** Quando presente, o dialog está EDITANDO essa reserva, não criando uma. */
   reservaPre: Reservation | null
+  /** Fechamento do expediente, "HH:MM" — para recortar a checagem de mesa livre. */
+  fechamento: string
 }>()
 
 const editando = computed(() => props.reservaPre !== null)
@@ -102,10 +104,17 @@ const instanteFimReal = computed(() => {
   return instanteDe(amanha.toISOString().slice(0, 10) as DateOnly, fimHHMM.value, props.tz)
 })
 
+// O fechamento como instante, no dia e fuso do formulário. Recorta a checagem de
+// mesa livre — sem ele, uma reserva que passa das 23:00 (última mesa da noite)
+// marcaria toda mesa como ocupada, inclusive as vazias.
+const instanteFechamento = computed(() =>
+  props.dia && props.fechamento ? instanteDe(props.dia, props.fechamento, props.tz) : '',
+)
+
 /** A grade já traz as janelas livres calculadas pelo Go: aqui é só contenção. */
 function estaLivre(mesa: TableAvailability): boolean {
   if (!instanteInicio.value || !instanteFimReal.value) return true
-  return livreEm(mesa, instanteInicio.value, instanteFimReal.value)
+  return livreParaReserva(mesa, instanteInicio.value, instanteFimReal.value, instanteFechamento.value)
 }
 
 const lugaresSelecionados = computed(() =>

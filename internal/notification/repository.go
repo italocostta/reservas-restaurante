@@ -122,3 +122,49 @@ func (r *PostgresRepo) MarkFailed(ctx context.Context, id uuid.UUID, maxTentativ
 	}
 	return nil
 }
+
+// NotificationView é uma linha da fila exposta pela API de observação (débito #11:
+// antes, uma notificação que esgotava as tentativas virava 'failed' e ninguém era
+// avisado). É uma view separada do Notification interno do worker de propósito: o
+// worker precisa do payload cru para reenviar; quem observa precisa do que
+// IDENTIFICA a falha — a reserva, o tipo, quantas tentativas, e o último erro.
+type NotificationView struct {
+	ID            uuid.UUID `json:"id"`
+	ReservationID uuid.UUID `json:"reservation_id"`
+	Kind          Kind      `json:"kind"          example:"reservation_confirmed"`
+	Status        string    `json:"status"        example:"failed"`
+	Attempts      int       `json:"attempts"      example:"3"`
+	LastError     string    `json:"last_error"    example:"sender: timeout"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+const listByStatusSQL = `
+SELECT id, reservation_id, kind, status, attempts, coalesce(last_error, ''), created_at
+FROM notifications
+WHERE status = $1
+ORDER BY created_at DESC`
+
+// ListByStatus lê as notificações de um status para inspeção. Ordena da mais recente
+// para a mais antiga: quem abre esta lista quer ver a última falha primeiro. Não
+// pagina — para o volume de um restaurante, as 'failed' são poucas (e se um dia não
+// forem, isso mesmo é o sinal de alarme que o débito #11 queria tornar visível).
+func (r *PostgresRepo) ListByStatus(ctx context.Context, status string) ([]NotificationView, error) {
+	rows, err := r.db.Query(ctx, listByStatusSQL, status)
+	if err != nil {
+		return nil, fmt.Errorf("listando notificações %q: %w", status, err)
+	}
+	defer rows.Close()
+
+	out := []NotificationView{}
+	for rows.Next() {
+		var v NotificationView
+		if err := rows.Scan(&v.ID, &v.ReservationID, &v.Kind, &v.Status, &v.Attempts, &v.LastError, &v.CreatedAt); err != nil {
+			return nil, fmt.Errorf("lendo notificação: %w", err)
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listando notificações %q: %w", status, err)
+	}
+	return out, nil
+}

@@ -48,6 +48,43 @@
                 }
             }
         },
+        "/notifications": {
+            "get": {
+                "description": "Existe para tornar visível a notificação que esgotou as tentativas e virou `failed` — antes, ela ficava assim e ninguém era avisado. Sem `status`, devolve as `failed` (o caso de uso). Ordenadas da mais recente para a mais antiga.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "notificações"
+                ],
+                "summary": "Lista notificações por status (observação da fila)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Filtra por status (pending, sending, sent, failed). Omitido = failed",
+                        "name": "status",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/notification.NotificationView"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "status inválido",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/reservations": {
             "get": {
                 "description": "Filtros opcionais e combináveis. `date` é interpretado no fuso do restaurante, não em UTC.",
@@ -352,6 +389,12 @@
                         "schema": {
                             "$ref": "#/definitions/httpx.ErrorResponse"
                         }
+                    },
+                    "409": {
+                        "description": "Remover a exceção re-fecharia o dia, que tem reservas confirmadas",
+                        "schema": {
+                            "$ref": "#/definitions/httpx.ErrorResponse"
+                        }
                     }
                 }
             }
@@ -651,6 +694,53 @@
                 "error": {
                     "type": "string",
                     "example": "Grupo de 6 pessoas excede a capacidade da mesa (4)."
+                }
+            }
+        },
+        "notification.Kind": {
+            "type": "string",
+            "enum": [
+                "reservation_confirmed",
+                "reservation_cancelled",
+                "reservation_updated"
+            ],
+            "x-enum-varnames": [
+                "KindConfirmed",
+                "KindCancelled",
+                "KindUpdated"
+            ]
+        },
+        "notification.NotificationView": {
+            "type": "object",
+            "properties": {
+                "attempts": {
+                    "type": "integer",
+                    "example": 3
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/notification.Kind"
+                        }
+                    ],
+                    "example": "reservation_confirmed"
+                },
+                "last_error": {
+                    "type": "string",
+                    "example": "sender: timeout"
+                },
+                "reservation_id": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string",
+                    "example": "failed"
                 }
             }
         },

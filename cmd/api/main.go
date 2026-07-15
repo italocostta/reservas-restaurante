@@ -117,7 +117,13 @@ func run() error {
 	schedule := reservation.NewSchedule(reservationRepo, settingsRepo)
 	reservationHandler := reservation.NewHandler(allocator, reservationRepo, schedule)
 
-	router := httpserver.New(cfg, tableHandler, reservationHandler, settingsHandler)
+	// O mesmo repositório de notificações serve dois donos: o dispatcher (que
+	// reivindica e despacha a fila) e o handler HTTP de observação (GET
+	// /notifications), que expõe as que falharam. Um escreve a fila, o outro só a lê.
+	notificationRepo := notification.NewPostgresRepo(pool)
+	notificationHandler := notification.NewHandler(notificationRepo)
+
+	router := httpserver.New(cfg, tableHandler, reservationHandler, settingsHandler, notificationHandler)
 
 	// O dispatcher tem contexto PRÓPRIO, derivado com WithoutCancel do ctx do
 	// sinal. Ele precisa sobreviver ao Ctrl+C para ser derrubado só DEPOIS do
@@ -126,7 +132,7 @@ func run() error {
 	defer pararDispatcher()
 
 	dispatcher := notification.NewDispatcher(
-		notification.NewPostgresRepo(pool),
+		notificationRepo,
 		notification.LogSender{},
 		notification.DefaultConfig(),
 	)

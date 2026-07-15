@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"reservas-restaurante/internal/config"
+	"reservas-restaurante/internal/notification"
 	"reservas-restaurante/internal/reservation"
 	"reservas-restaurante/internal/settings"
 	"reservas-restaurante/internal/table"
@@ -38,6 +39,7 @@ var rotas = []struct {
 	{http.MethodPut, "/service-hours"},
 	{http.MethodPost, "/service-exceptions"},
 	{http.MethodDelete, "/service-exceptions/x"},
+	{http.MethodGet, "/notifications"},
 }
 
 // routerDeTeste monta o router real. Os handlers vão com dependências nil de
@@ -47,8 +49,9 @@ func routerDeTeste() http.Handler {
 	tables := table.NewHandler(nil, nil)
 	reservations := reservation.NewHandler(nil, nil, nil)
 	cfgRest := settings.NewHandler(nil, nil)
+	notifs := notification.NewHandler(nil)
 	cfg := config.Config{CORSAllowedOrigin: origemTeste}
-	return New(cfg, tables, reservations, cfgRest)
+	return New(cfg, tables, reservations, cfgRest, notifs)
 }
 
 // Todo método que o router atende tem que estar no Access-Control-Allow-Methods do

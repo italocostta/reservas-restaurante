@@ -6,6 +6,38 @@ definitions:
         example: Grupo de 6 pessoas excede a capacidade da mesa (4).
         type: string
     type: object
+  notification.Kind:
+    enum:
+    - reservation_confirmed
+    - reservation_cancelled
+    - reservation_updated
+    type: string
+    x-enum-varnames:
+    - KindConfirmed
+    - KindCancelled
+    - KindUpdated
+  notification.NotificationView:
+    properties:
+      attempts:
+        example: 3
+        type: integer
+      created_at:
+        type: string
+      id:
+        type: string
+      kind:
+        allOf:
+        - $ref: '#/definitions/notification.Kind'
+        example: reservation_confirmed
+      last_error:
+        example: 'sender: timeout'
+        type: string
+      reservation_id:
+        type: string
+      status:
+        example: failed
+        type: string
+    type: object
   reservation.Reservation:
     properties:
       created_at:
@@ -244,6 +276,34 @@ paths:
       summary: Grade de disponibilidade do dia (todas as mesas)
       tags:
       - mesas
+  /notifications:
+    get:
+      description: Existe para tornar visível a notificação que esgotou as tentativas
+        e virou `failed` — antes, ela ficava assim e ninguém era avisado. Sem `status`,
+        devolve as `failed` (o caso de uso). Ordenadas da mais recente para a mais
+        antiga.
+      parameters:
+      - description: Filtra por status (pending, sending, sent, failed). Omitido =
+          failed
+        in: query
+        name: status
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/notification.NotificationView'
+            type: array
+        "400":
+          description: status inválido
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+      summary: Lista notificações por status (observação da fila)
+      tags:
+      - notificações
   /reservations:
     get:
       description: Filtros opcionais e combináveis. `date` é interpretado no fuso
@@ -457,6 +517,10 @@ paths:
           description: Removida
         "400":
           description: Data inválida
+          schema:
+            $ref: '#/definitions/httpx.ErrorResponse'
+        "409":
+          description: Remover a exceção re-fecharia o dia, que tem reservas confirmadas
           schema:
             $ref: '#/definitions/httpx.ErrorResponse'
       summary: Remove uma exceção (a data volta a seguir a regra semanal)
